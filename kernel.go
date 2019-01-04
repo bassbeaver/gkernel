@@ -190,21 +190,32 @@ func (k *Kernel) readConfig() {
 			panic("failed to read application level event listeners config, error: " + commonListenersConfigErr.Error())
 		}
 
+		errorHandler := func(lc config.EventListenerConfig, err error) {
+			if nil == err {
+				return
+			}
+
+			panic(
+				fmt.Sprintf(
+					"failed to register application level event listener %s, event: %s, error: %s",
+					lc.Listener,
+					lc.EventName,
+					err.Error(),
+				),
+			)
+		}
+
 		for _, listenerConfig := range applicationLevelListenersConfig {
 			listenerObj := k.GetContainer().GetByAlias(listenerConfig.ListenerAlias())
 			eventObj, eventRegistryError := k.eventsRegistry.GetEventByName(listenerConfig.EventName)
-			if nil != eventRegistryError {
-				panic("failed to register application level event listener, error: " + eventRegistryError.Error())
-			}
+			errorHandler(listenerConfig, eventRegistryError)
 
 			listenerError := k.RegisterListener(
 				eventObj,
 				reflect.ValueOf(listenerObj).MethodByName(listenerConfig.ListenerMethod()).Interface(),
 				listenerConfig.Priority,
 			)
-			if nil != listenerError {
-				panic("failed to register application level event listener, error: " + listenerError.Error())
-			}
+			errorHandler(listenerConfig, listenerError)
 		}
 	}
 }
