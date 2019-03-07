@@ -3,6 +3,7 @@ module github.com/bassbeaver/gkernel
 require (
 	github.com/BurntSushi/toml v0.3.1 // indirect
 	github.com/bassbeaver/gioc v0.3.0-beta
+	github.com/gorilla/websocket v1.4.0
 	github.com/husobee/vestigo v1.1.0
 	github.com/kr/pretty v0.1.0 // indirect
 	github.com/spf13/viper v1.3.1

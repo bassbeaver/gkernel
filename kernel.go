@@ -151,7 +151,11 @@ func (k *Kernel) readConfig() {
 
 			// Registering route
 			controllerObj := k.GetContainer().GetByAlias(routeConfig.ControllerAlias())
-			controller := reflect.ValueOf(controllerObj).MethodByName(routeConfig.ControllerMethod()).Interface().(func(*http.Request) response.Response)
+			controllerMethodValue := reflect.ValueOf(controllerObj).MethodByName(routeConfig.ControllerMethod())
+			if (reflect.Value{}) == controllerMethodValue {
+				panic(fmt.Sprintf("method %s not found in controller object %s", routeConfig.ControllerMethod(), routeConfig.ControllerAlias()))
+			}
+			controller := controllerMethodValue.Interface().(func(*http.Request) response.Response)
 
 			k.RegisterRoute(&Route{
 				Name:       routeName,
@@ -231,7 +235,7 @@ func (k *Kernel) createRouteHandler(route *Route) http.HandlerFunc {
 
 	return http.HandlerFunc(func(responseWriter http.ResponseWriter, requestObj *http.Request) {
 		RequestContextAppend(requestObj, "event_bus", eventBus)
-		responseObj := k.runRequestProcessingFlow(requestObj, route.Controller)
+		responseObj := k.runRequestProcessingFlow(requestObj, route.Controller, responseWriter)
 		k.runSendResponse(requestObj, responseObj, responseWriter)
 	})
 }
@@ -280,7 +284,11 @@ func (k *Kernel) parseTemplatesPath(templatesPath string) (*template.Template, e
 	return result, nil
 }
 
-func (k *Kernel) runRequestProcessingFlow(requestObj *http.Request, controller Controller) (responseObj response.Response) {
+func (k *Kernel) runRequestProcessingFlow(
+	requestObj *http.Request,
+	controller Controller,
+	responseWriter http.ResponseWriter,
+) (responseObj response.Response) {
 	defer func() {
 		// Recover should be called directly by a deferred function. https://golang.org/ref/spec#Handling_panics
 		recoveredError := recover()
@@ -301,6 +309,10 @@ func (k *Kernel) runRequestProcessingFlow(requestObj *http.Request, controller C
 	// Running controller if request pre-processing has not returned response
 	if nil == responseObj {
 		responseObj = controller(requestObj)
+
+		if websocketUpgradeResponse, isWebsocketUpgrade := responseObj.(*response.WebsocketUpgradeResponse); isWebsocketUpgrade {
+			websocketUpgradeResponse.UpgradeToWebsocket(requestObj, responseWriter)
+		}
 
 		// Running RequestProcessed event processing
 		requestProcessedEvent := event.NewRequestProcessed(requestObj, responseObj)
