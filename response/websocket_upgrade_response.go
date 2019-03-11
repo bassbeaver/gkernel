@@ -18,19 +18,7 @@ func (r *WebsocketUpgradeResponse) UpgradeToWebsocket(request *http.Request, res
 	if wsUpgradeError != nil {
 		errorText := "WS upgrade error: " + wsUpgradeError.Error()
 		panic("WS upgrade error: " + errorText)
-		//logger.Critical(errorText, nil)
-		//
-		//r := kernelResponse.NewBytesResponseWriter()
-		//r.Write([]byte(errorText))
-		//
-		//return r
 	}
-	//defer func() {
-	//	wsCloseError := wsConnection.Close()
-	//	if nil != wsCloseError {
-	//		logger.Critical("WS close error: "+wsCloseError.Error(), nil)
-	//	}
-	//}()
 
 	go r.controller(wsConnection)
 }
