@@ -151,7 +151,11 @@ func (k *Kernel) readConfig() {
 
 			// Registering route
 			controllerObj := k.GetContainer().GetByAlias(routeConfig.ControllerAlias())
-			controller := reflect.ValueOf(controllerObj).MethodByName(routeConfig.ControllerMethod()).Interface().(func(*http.Request) response.Response)
+			controllerMethodValue := reflect.ValueOf(controllerObj).MethodByName(routeConfig.ControllerMethod())
+			if (reflect.Value{}) == controllerMethodValue {
+				panic(fmt.Sprintf("method %s not found in controller object %s", routeConfig.ControllerMethod(), routeConfig.ControllerAlias()))
+			}
+			controller := controllerMethodValue.Interface().(func(*http.Request) response.Response)
 
 			k.RegisterRoute(&Route{
 				Name:       routeName,
