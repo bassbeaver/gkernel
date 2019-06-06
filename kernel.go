@@ -49,6 +49,10 @@ func (k *Kernel) RegisterRoute(route *Route) *Kernel {
 	return k
 }
 
+func (k *Kernel) GetTemplates() *template.Template {
+	return k.templates
+}
+
 func (k *Kernel) RegisterListener(eventObj event.Event, listenerFunc interface{}, priority int) error {
 	return k.eventBus.AppendListener(eventObj, listenerFunc, priority)
 }
@@ -126,8 +130,7 @@ func (k *Kernel) Run() {
 func (k *Kernel) readConfig() {
 	// Parsing templates if templates are configured
 	if k.config.IsSet("templates_path") {
-		var templateError error
-		k.templates, templateError = k.parseTemplatesPath(k.config.GetString("templates_path"))
+		templateError := k.parseTemplatesPath(k.config.GetString("templates_path"))
 		if nil != templateError {
 			panic(templateError)
 		}
@@ -248,9 +251,7 @@ func (k *Kernel) createNotFoundHandler() http.HandlerFunc {
 	})
 }
 
-func (k *Kernel) parseTemplatesPath(templatesPath string) (*template.Template, error) {
-	result := template.New("root")
-
+func (k *Kernel) parseTemplatesPath(templatesPath string) error {
 	fullTemplatesPath := k.config.GetString("workdir") + "/" + templatesPath
 
 	pathWalkError := filepath.Walk(
@@ -272,16 +273,13 @@ func (k *Kernel) parseTemplatesPath(templatesPath string) (*template.Template, e
 
 			tplName := strings.Replace(path, fullTemplatesPath+"/", "", -1)
 
-			result.New(tplName).Parse(tplFileContent)
+			_, parseError := k.templates.New(tplName).Parse(tplFileContent)
 
-			return nil
+			return parseError
 		},
 	)
-	if nil != pathWalkError {
-		return nil, pathWalkError
-	}
 
-	return result, nil
+	return pathWalkError
 }
 
 func (k *Kernel) runRequestProcessingFlow(
@@ -392,6 +390,7 @@ func NewKernel(configFile string) (*Kernel, error) {
 		routes:         make(map[string]*Route, 0),
 		eventsRegistry: event_bus.NewDefaultRegistry(),
 		eventBus:       event_bus.NewEventBus(),
+		templates:      template.New("root"),
 	}
 
 	configObj := viper.New()
