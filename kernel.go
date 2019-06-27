@@ -400,7 +400,12 @@ func NewKernel(configFile string) (*Kernel, error) {
 	}
 
 	// Setting config to kernel
-	kernel.config.Set("workdir", filepath.Dir(configFile))
+	workdir, workdirError := os.Getwd()
+	if nil != workdirError {
+		panic("failed to determine working directory, error: " + workdirError.Error())
+	}
+	kernel.config.Set("workdir", workdir)
+
 	copyParam(
 		[]string{"http_port", "templates_path", "services", "routing", "event_listeners"},
 		configObj,
