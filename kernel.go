@@ -375,15 +375,65 @@ func (k *Kernel) performResponseSend(requestObj *http.Request, responseObj respo
 
 //--------------------
 
-func NewKernel(configFile string) (*Kernel, error) {
-	copyParam := func(params []string, source, target *viper.Viper) {
-		for _, param := range params {
-			if source.IsSet(param) {
-				target.Set(param, source.Get(param))
-			}
-		}
+func NewKernel(configPath string) (*Kernel, error) {
+	// Read config files to temporary viper object
+	configObj := viper.New()
+
+	var configDir string
+	configPathStat, configPathStatError := os.Stat(configPath)
+	if nil != configPathStatError {
+		return nil, errors.New("failed to read configs: " + configPathStatError.Error())
+	}
+	if configPathStat.IsDir() {
+		configDir = configPath
+	} else {
+		configDir = filepath.Dir(configPath)
 	}
 
+	firstConfigFile := true
+	pathWalkError := filepath.Walk(
+		configDir,
+		func(path string, info os.FileInfo, err error) error {
+			if err != nil {
+				return errors.New("failed to read config file " + path + ", error: " + err.Error())
+			}
+
+			if info.IsDir() {
+				return nil
+			}
+
+			configFilePath := filepath.Dir(path)
+			configFileExt := filepath.Ext(info.Name())
+			// if extension is not allowed - take next file
+			if !stringInSlice(configFileExt[1:], viper.SupportedExts) {
+				return nil
+			}
+
+			configFileName := info.Name()[0 : len(info.Name())-len(configFileExt)]
+
+			configObj.AddConfigPath(configFilePath)
+			configObj.SetConfigName(configFileName)
+
+			if firstConfigFile {
+				if configError := configObj.ReadInConfig(); nil != configError {
+					return configError
+				}
+
+				firstConfigFile = false
+			} else {
+				if configError := configObj.MergeInConfig(); nil != configError {
+					return configError
+				}
+			}
+
+			return nil
+		},
+	)
+	if nil != pathWalkError {
+		return nil, errors.New("failed to read configs: " + pathWalkError.Error())
+	}
+
+	// Creating kernel obj
 	kernel := &Kernel{
 		config:         viper.New(),
 		container:      gioc.NewContainer(),
@@ -393,24 +443,25 @@ func NewKernel(configFile string) (*Kernel, error) {
 		templates:      template.New("root"),
 	}
 
-	configObj := viper.New()
-	configObj.SetConfigFile(configFile)
-	if configError := configObj.ReadInConfig(); nil != configError {
-		return nil, configError
-	}
-
-	// Setting config to kernel
-	workdir, workdirError := os.Getwd()
-	if nil != workdirError {
-		panic("failed to determine working directory, error: " + workdirError.Error())
-	}
-	kernel.config.Set("workdir", workdir)
-
-	copyParam(
+	// Copy known config parts to kernel's viper object
+	func(params []string, source, target *viper.Viper) {
+		for _, param := range params {
+			if source.IsSet(param) {
+				target.Set(param, source.Get(param))
+			}
+		}
+	}(
 		[]string{"http_port", "templates_path", "services", "routing", "event_listeners"},
 		configObj,
 		kernel.config,
 	)
+
+	// Set working directory config
+	workdir, workdirError := os.Getwd()
+	if nil != workdirError {
+		return nil, errors.New("failed to determine working directory, error: " + workdirError.Error())
+	}
+	kernel.config.Set("workdir", workdir)
 
 	// Setting parameters to container
 	if configObj.IsSet("parameters") {
@@ -493,4 +544,14 @@ func GetRequestEventBus(requestObj *http.Request) event_bus.EventBus {
 func RequestContextAppend(requestObj *http.Request, key, val interface{}) {
 	newContext := context.WithValue(requestObj.Context(), key, val)
 	*requestObj = *requestObj.WithContext(newContext)
+}
+
+func stringInSlice(a string, list []string) bool {
+	for _, b := range list {
+		if b == a {
+			return true
+		}
+	}
+
+	return false
 }
