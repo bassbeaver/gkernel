@@ -16,14 +16,18 @@ import (
 	"io/ioutil"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"reflect"
 	"runtime/debug"
 	"strings"
+	"syscall"
+	"time"
 )
 
 const (
-	configServicesPrefix = "services"
+	configServicesPrefix           = "services"
+	configDefaultShutdownTimeoutMs = 500
 )
 
 type Kernel struct {
@@ -33,6 +37,7 @@ type Kernel struct {
 	eventsRegistry *event_bus.EventsRegistry
 	eventBus       event_bus.EventBus
 	templates      *template.Template
+	httpServer     *http.Server
 }
 
 func (k *Kernel) GetContainer() *gioc.Container {
@@ -51,6 +56,10 @@ func (k *Kernel) RegisterRoute(route *Route) *Kernel {
 
 func (k *Kernel) GetTemplates() *template.Template {
 	return k.templates
+}
+
+func (k *Kernel) GetHttpServer() *http.Server {
+	return k.httpServer
 }
 
 func (k *Kernel) RegisterListener(eventObj event.Event, listenerFunc interface{}, priority int) error {
@@ -97,10 +106,16 @@ func (k *Kernel) RegisterService(alias string, factoryMethod interface{}, enable
 }
 
 func (k *Kernel) Run() {
+	if !k.config.IsSet("http_port") {
+		panic("Failed to start application, http port to serve not configured")
+	}
+	portNum := k.config.GetInt("http_port")
+
 	if noCycles, cycledService := k.container.CheckCycles(); !noCycles {
 		panic("Failed to start application, errors in DI container: service " + cycledService + " has circular dependencies")
 	}
 
+	// Config files reading
 	k.readConfig()
 
 	// Routes handlers setup
@@ -114,17 +129,25 @@ func (k *Kernel) Run() {
 	// 404 handler setup
 	vestigo.CustomNotFoundHandlerFunc(k.createNotFoundHandler())
 
-	if !k.config.IsSet("http_port") {
-		panic("Failed to start application, http port to serve not configured")
-	}
-	portNum := k.config.GetInt("http_port")
-
 	// Processing of application-level events
 	k.eventBus.Dispatch(event.NewApplicationLaunched(k))
-	defer k.eventBus.Dispatch(event.NewApplicationTermination(k))
 
-	e := http.ListenAndServe(fmt.Sprintf(":%d", portNum), router)
-	panic(e)
+	terminationErrors := make([]error, 0)
+	defer k.eventBus.Dispatch(event.NewApplicationTermination(k, &terminationErrors))
+
+	// HTTP Server setup
+	k.httpServer.Handler = router
+	k.httpServer.Addr = fmt.Sprintf(":%d", portNum)
+
+	// Graceful HTTP Server shutdown on signals setup
+	httpShutdownChannel := k.setupGraceShutdown(&terminationErrors)
+
+	// Run HTTP Server and wait for graceful shutdown
+	listenError := k.httpServer.ListenAndServe()
+	if nil != listenError && http.ErrServerClosed != listenError {
+		terminationErrors = append(terminationErrors, listenError)
+	}
+	<-httpShutdownChannel
 }
 
 func (k *Kernel) readConfig() {
@@ -373,6 +396,43 @@ func (k *Kernel) performResponseSend(requestObj *http.Request, responseObj respo
 	responseWriter.Write(responseBody)
 }
 
+func (k *Kernel) setupGraceShutdown(terminationErrors *[]error) chan bool {
+	shutdownTimeout := k.config.GetDuration("shutdown_timeout")
+	if 0 >= shutdownTimeout {
+		shutdownTimeout = configDefaultShutdownTimeoutMs
+	}
+	shutdownTimeout = shutdownTimeout * time.Millisecond
+
+	signalsChannel := make(chan os.Signal)
+	httpShutdownChannel := make(chan bool)
+
+	signal.Notify(signalsChannel, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		defer close(signalsChannel)
+
+		<-signalsChannel
+
+		shutdownContext, shutdownContextCancelFunc := context.WithTimeout(context.Background(), shutdownTimeout)
+		defer shutdownContextCancelFunc()
+
+		shutdownError := k.httpServer.Shutdown(shutdownContext)
+		if nil != shutdownError {
+			if context.DeadlineExceeded == shutdownError {
+				*terminationErrors = append(
+					*terminationErrors,
+					errors.New(fmt.Sprintf("Gkernel: graceful shutdown timeout of %s expired", shutdownTimeout)),
+				)
+			} else {
+				*terminationErrors = append(*terminationErrors, shutdownError)
+			}
+		}
+
+		httpShutdownChannel <- true
+	}()
+
+	return httpShutdownChannel
+}
+
 //--------------------
 
 func NewKernel(configPath string) (*Kernel, error) {
@@ -441,6 +501,7 @@ func NewKernel(configPath string) (*Kernel, error) {
 		eventsRegistry: event_bus.NewDefaultRegistry(),
 		eventBus:       event_bus.NewEventBus(),
 		templates:      template.New("root"),
+		httpServer:     &http.Server{},
 	}
 
 	// Copy known config parts to kernel's viper object
@@ -451,7 +512,7 @@ func NewKernel(configPath string) (*Kernel, error) {
 			}
 		}
 	}(
-		[]string{"http_port", "templates_path", "services", "routing", "event_listeners"},
+		[]string{"http_port", "templates_path", "shutdown_timeout", "services", "routing", "event_listeners"},
 		configObj,
 		kernel.config,
 	)
