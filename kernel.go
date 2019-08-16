@@ -28,6 +28,8 @@ import (
 const (
 	configServicesPrefix           = "services"
 	configDefaultShutdownTimeoutMs = 500
+	requestCtxEventBusKey          = "event_bus"
+	requestCtxResponseWriterKey    = "response_writer"
 )
 
 type Kernel struct {
@@ -260,15 +262,16 @@ func (k *Kernel) createRouteHandler(route *Route) http.HandlerFunc {
 	}
 
 	return http.HandlerFunc(func(responseWriter http.ResponseWriter, requestObj *http.Request) {
-		RequestContextAppend(requestObj, "event_bus", eventBus)
-		responseObj := k.runRequestProcessingFlow(requestObj, route.Controller, responseWriter)
+		RequestContextAppend(requestObj, requestCtxEventBusKey, eventBus)
+		RequestContextAppend(requestObj, requestCtxResponseWriterKey, responseWriter)
+		responseObj := k.runRequestProcessingFlow(requestObj, route.Controller)
 		k.runSendResponse(requestObj, responseObj, responseWriter)
 	})
 }
 
 func (k *Kernel) createNotFoundHandler() http.HandlerFunc {
 	return http.HandlerFunc(func(responseWriter http.ResponseWriter, requestObj *http.Request) {
-		RequestContextAppend(requestObj, "event_bus", k.eventBus)
+		RequestContextAppend(requestObj, requestCtxEventBusKey, k.eventBus)
 		responseObj := runNotFoundFlow(requestObj)
 		k.runSendResponse(requestObj, responseObj, responseWriter)
 	})
@@ -308,7 +311,6 @@ func (k *Kernel) parseTemplatesPath(templatesPath string) error {
 func (k *Kernel) runRequestProcessingFlow(
 	requestObj *http.Request,
 	controller Controller,
-	responseWriter http.ResponseWriter,
 ) (responseObj response.Response) {
 	defer func() {
 		// Recover should be called directly by a deferred function. https://golang.org/ref/spec#Handling_panics
@@ -332,6 +334,7 @@ func (k *Kernel) runRequestProcessingFlow(
 		responseObj = controller(requestObj)
 
 		if websocketUpgradeResponse, isWebsocketUpgrade := responseObj.(*response.WebsocketUpgradeResponse); isWebsocketUpgrade {
+			responseWriter := requestObj.Context().Value(requestCtxResponseWriterKey).(http.ResponseWriter)
 			websocketUpgradeResponse.UpgradeToWebsocket(requestObj, responseWriter)
 		}
 
@@ -592,7 +595,7 @@ func performRecover(recoveredError interface{}, trace []byte, requestObj *http.R
 }
 
 func GetRequestEventBus(requestObj *http.Request) event_bus.EventBus {
-	eventBus := requestObj.Context().Value("event_bus")
+	eventBus := requestObj.Context().Value(requestCtxEventBusKey)
 	if nil != eventBus {
 		if eventBusTyped, isEventBus := eventBus.(event_bus.EventBus); isEventBus {
 			return eventBusTyped
