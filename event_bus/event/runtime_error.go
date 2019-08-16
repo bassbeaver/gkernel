@@ -17,11 +17,12 @@ func (e *RuntimeError) GetError() *kernelError.RuntimeError {
 
 //--------------------
 
-func NewRuntimeError(requestObj *http.Request, errorObj *kernelError.RuntimeError) *RuntimeError {
+func NewRuntimeError(responseWriterObj http.ResponseWriter, requestObj *http.Request, errorObj *kernelError.RuntimeError) *RuntimeError {
 	return &RuntimeError{
 		errorObj: errorObj,
 		RequestHolder: RequestHolder{
-			requestObj: requestObj,
+			responseWriterObj: responseWriterObj,
+			requestObj:        requestObj,
 		},
 	}
 }

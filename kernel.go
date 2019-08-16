@@ -28,6 +28,7 @@ import (
 const (
 	configServicesPrefix           = "services"
 	configDefaultShutdownTimeoutMs = 500
+	requestCtxEventBusKey          = "event_bus"
 )
 
 type Kernel struct {
@@ -260,17 +261,17 @@ func (k *Kernel) createRouteHandler(route *Route) http.HandlerFunc {
 	}
 
 	return http.HandlerFunc(func(responseWriter http.ResponseWriter, requestObj *http.Request) {
-		RequestContextAppend(requestObj, "event_bus", eventBus)
-		responseObj := k.runRequestProcessingFlow(requestObj, route.Controller, responseWriter)
-		k.runSendResponse(requestObj, responseObj, responseWriter)
+		RequestContextAppend(requestObj, requestCtxEventBusKey, eventBus)
+		responseObj := k.runRequestProcessingFlow(responseWriter, requestObj, route.Controller)
+		k.runSendResponse(responseWriter, requestObj, responseObj)
 	})
 }
 
 func (k *Kernel) createNotFoundHandler() http.HandlerFunc {
 	return http.HandlerFunc(func(responseWriter http.ResponseWriter, requestObj *http.Request) {
-		RequestContextAppend(requestObj, "event_bus", k.eventBus)
-		responseObj := runNotFoundFlow(requestObj)
-		k.runSendResponse(requestObj, responseObj, responseWriter)
+		RequestContextAppend(requestObj, requestCtxEventBusKey, k.eventBus)
+		responseObj := runNotFoundFlow(responseWriter, requestObj)
+		k.runSendResponse(responseWriter, requestObj, responseObj)
 	})
 }
 
@@ -306,24 +307,22 @@ func (k *Kernel) parseTemplatesPath(templatesPath string) error {
 }
 
 func (k *Kernel) runRequestProcessingFlow(
+	responseWriterObj http.ResponseWriter,
 	requestObj *http.Request,
 	controller Controller,
-	responseWriter http.ResponseWriter,
 ) (responseObj response.Response) {
 	defer func() {
 		// Recover should be called directly by a deferred function. https://golang.org/ref/spec#Handling_panics
 		recoveredError := recover()
-		if nil == recoveredError {
-			return
+		if nil != recoveredError {
+			responseObj = performRecover(recoveredError, debug.Stack(), responseWriterObj, requestObj)
 		}
-
-		responseObj = performRecover(recoveredError, debug.Stack(), requestObj)
 	}()
 
 	eventBus := GetRequestEventBus(requestObj)
 
 	// Running RequestReceived event processing
-	requestReceivedEvent := event.NewRequestReceived(requestObj)
+	requestReceivedEvent := event.NewRequestReceived(responseWriterObj, requestObj)
 	eventBus.Dispatch(requestReceivedEvent)
 	responseObj = requestReceivedEvent.GetResponse()
 
@@ -332,11 +331,11 @@ func (k *Kernel) runRequestProcessingFlow(
 		responseObj = controller(requestObj)
 
 		if websocketUpgradeResponse, isWebsocketUpgrade := responseObj.(*response.WebsocketUpgradeResponse); isWebsocketUpgrade {
-			websocketUpgradeResponse.UpgradeToWebsocket(requestObj, responseWriter)
+			websocketUpgradeResponse.UpgradeToWebsocket(requestObj, responseWriterObj)
 		}
 
 		// Running RequestProcessed event processing
-		requestProcessedEvent := event.NewRequestProcessed(requestObj, responseObj)
+		requestProcessedEvent := event.NewRequestProcessed(responseWriterObj, requestObj, responseObj)
 		eventBus.Dispatch(requestProcessedEvent)
 		responseObj = requestProcessedEvent.GetResponse()
 	}
@@ -344,21 +343,19 @@ func (k *Kernel) runRequestProcessingFlow(
 	return
 }
 
-func (k *Kernel) runSendResponse(requestObj *http.Request, responseObj response.Response, responseWriter http.ResponseWriter) {
-	k.performResponseSend(requestObj, responseObj, responseWriter)
+func (k *Kernel) runSendResponse(responseWriter http.ResponseWriter, requestObj *http.Request, responseObj response.Response) {
+	k.performResponseSend(responseWriter, requestObj, responseObj)
 	go performRequestTermination(requestObj, responseObj)
 }
 
-func (k *Kernel) performResponseSend(requestObj *http.Request, responseObj response.Response, responseWriter http.ResponseWriter) {
+func (k *Kernel) performResponseSend(responseWriter http.ResponseWriter, requestObj *http.Request, responseObj response.Response) {
 	defer func() {
 		// Recover should be called directly by a deferred function. https://golang.org/ref/spec#Handling_panics
 		recoveredError := recover()
-		if nil == recoveredError {
-			return
+		if nil != recoveredError {
+			responseWriter.WriteHeader(http.StatusInternalServerError)
+			responseWriter.Write([]byte(fmt.Sprintf("Failed to send response. Error: %+v", recoveredError)))
 		}
-
-		responseWriter.WriteHeader(http.StatusInternalServerError)
-		responseWriter.Write([]byte(fmt.Sprintf("Failed to send response. Error: %+v", recoveredError)))
 	}()
 
 	if nil == responseObj {
@@ -370,7 +367,7 @@ func (k *Kernel) performResponseSend(requestObj *http.Request, responseObj respo
 
 	// Running ResponseBeforeSend event processing
 	eventBus := GetRequestEventBus(requestObj)
-	responseBeforeSendEvent := event.NewResponseBeforeSend(requestObj, responseObj)
+	responseBeforeSendEvent := event.NewResponseBeforeSend(responseWriter, requestObj, responseObj)
 	eventBus.Dispatch(responseBeforeSendEvent)
 
 	// If response is view - execute template and fill response body
@@ -535,21 +532,19 @@ func NewKernel(configPath string) (*Kernel, error) {
 
 //--------------------
 
-func runNotFoundFlow(requestObj *http.Request) (responseObj response.Response) {
+func runNotFoundFlow(responseWriter http.ResponseWriter, requestObj *http.Request) (responseObj response.Response) {
 	defer func() {
 		// Recover should be called directly by a deferred function. https://golang.org/ref/spec#Handling_panics
 		recoveredError := recover()
-		if nil == recoveredError {
-			return
+		if nil != recoveredError {
+			responseObj = performRecover(recoveredError, debug.Stack(), responseWriter, requestObj)
 		}
-
-		responseObj = performRecover(recoveredError, debug.Stack(), requestObj)
 	}()
 
 	eventBus := GetRequestEventBus(requestObj)
 
 	errorObj := kernelError.NewNotFoundHttpError()
-	runtimeErrorEvent := event.NewRuntimeError(requestObj, kernelError.NewRuntimeError(errorObj, nil))
+	runtimeErrorEvent := event.NewRuntimeError(responseWriter, requestObj, kernelError.NewRuntimeError(errorObj, nil))
 	eventBus.Dispatch(runtimeErrorEvent)
 	responseObj = runtimeErrorEvent.GetResponse()
 
@@ -569,14 +564,14 @@ func performRequestTermination(requestObj *http.Request, responseObj response.Re
 	GetRequestEventBus(requestObj).Dispatch(requestTerminationEvent)
 }
 
-func performRecover(recoveredError interface{}, trace []byte, requestObj *http.Request) response.Response {
+func performRecover(recoveredError interface{}, trace []byte, responseWriterObj http.ResponseWriter, requestObj *http.Request) response.Response {
 	var responseObj response.Response
 
 	runtimeError := kernelError.NewRuntimeError(recoveredError, trace)
 
 	eventBus := GetRequestEventBus(requestObj)
 
-	runtimeErrorEvent := event.NewRuntimeError(requestObj, runtimeError)
+	runtimeErrorEvent := event.NewRuntimeError(responseWriterObj, requestObj, runtimeError)
 	eventBus.Dispatch(runtimeErrorEvent)
 	responseObj = runtimeErrorEvent.GetResponse()
 
@@ -592,7 +587,7 @@ func performRecover(recoveredError interface{}, trace []byte, requestObj *http.R
 }
 
 func GetRequestEventBus(requestObj *http.Request) event_bus.EventBus {
-	eventBus := requestObj.Context().Value("event_bus")
+	eventBus := requestObj.Context().Value(requestCtxEventBusKey)
 	if nil != eventBus {
 		if eventBusTyped, isEventBus := eventBus.(event_bus.EventBus); isEventBus {
 			return eventBusTyped
