@@ -13,10 +13,11 @@ type ResponseBeforeSend struct {
 
 //--------------------
 
-func NewResponseBeforeSend(requestObj *http.Request, responseObj response.Response) *ResponseBeforeSend {
+func NewResponseBeforeSend(responseWriterObj http.ResponseWriter, requestObj *http.Request, responseObj response.Response) *ResponseBeforeSend {
 	return &ResponseBeforeSend{
 		RequestHolder: RequestHolder{
-			requestObj: requestObj,
+			responseWriterObj: responseWriterObj,
+			requestObj:        requestObj,
 		},
 		ResponseHolder: ResponseHolder{
 			responseObj: responseObj,

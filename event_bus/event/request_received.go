@@ -9,10 +9,11 @@ type RequestReceived struct {
 
 //--------------------
 
-func NewRequestReceived(requestObj *http.Request) *RequestReceived {
+func NewRequestReceived(responseWriterObj http.ResponseWriter, requestObj *http.Request) *RequestReceived {
 	return &RequestReceived{
 		RequestHolder: RequestHolder{
-			requestObj: requestObj,
+			responseWriterObj: responseWriterObj,
+			requestObj:        requestObj,
 		},
 	}
 }

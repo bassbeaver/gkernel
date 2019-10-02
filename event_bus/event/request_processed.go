@@ -17,10 +17,11 @@ func (e *RequestProcessed) SetResponse(responseObj response.Response) {
 
 //--------------------
 
-func NewRequestProcessed(requestObj *http.Request, responseObj response.Response) *RequestProcessed {
+func NewRequestProcessed(responseWriterObj http.ResponseWriter, requestObj *http.Request, responseObj response.Response) *RequestProcessed {
 	return &RequestProcessed{
 		RequestHolder: RequestHolder{
-			requestObj: requestObj,
+			responseWriterObj: responseWriterObj,
+			requestObj:        requestObj,
 		},
 		Respondent: Respondent{
 			ResponseHolder: ResponseHolder{

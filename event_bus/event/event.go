@@ -29,7 +29,8 @@ func (e *Propagator) IsPropagationStopped() bool {
 //--------------------
 
 type RequestHolder struct {
-	requestObj *http.Request
+	requestObj        *http.Request
+	responseWriterObj http.ResponseWriter
 }
 
 func (h *RequestHolder) GetRequest() *http.Request {
@@ -39,6 +40,10 @@ func (h *RequestHolder) GetRequest() *http.Request {
 func (h *RequestHolder) RequestContextAppend(key, val interface{}) {
 	newContext := context.WithValue(h.requestObj.Context(), key, val)
 	*h.requestObj = *h.requestObj.WithContext(newContext)
+}
+
+func (h *RequestHolder) GetResponseWriter() http.ResponseWriter {
+	return h.responseWriterObj
 }
 
 //--------------------
