@@ -4,14 +4,8 @@ Simple Golang event-driven framework for web applications.
 
 ### Installation
 
-With go mod
  ```bash
  go get github.com/bassbeaver/gkernel
- ```
-
-With Dep:
- ```bash
- dep ensure --add github.com/bassbeaver/gkernel
  ```
  
  ### Concepts
