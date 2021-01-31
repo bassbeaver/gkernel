@@ -330,8 +330,15 @@ func (k *Kernel) runRequestProcessingFlow(
 	if nil == responseObj {
 		responseObj = controller(requestObj)
 
-		if websocketUpgradeResponse, isWebsocketUpgrade := responseObj.(*response.WebsocketUpgradeResponse); isWebsocketUpgrade {
-			websocketUpgradeResponse.UpgradeToWebsocket(requestObj, responseWriterObj)
+		switch typedResponse := responseObj.(type) {
+		// If response is websocket upgrade - perform it
+		case *response.WebsocketUpgradeResponse:
+			typedResponse.UpgradeToWebsocket(requestObj, responseWriterObj)
+		// If response is view - execute template and fill response body
+		case *response.ViewResponse:
+			if nil == typedResponse.Template {
+				typedResponse.SetTemplate(k.templates)
+			}
 		}
 
 		// Running RequestProcessed event processing
@@ -348,14 +355,52 @@ func (k *Kernel) runSendResponse(responseWriter http.ResponseWriter, requestObj 
 	go performRequestTermination(requestObj, responseObj)
 }
 
-func (k *Kernel) performResponseSend(responseWriter http.ResponseWriter, requestObj *http.Request, responseObj response.Response) {
+func (k *Kernel) performResponseSend(responseWriterObj http.ResponseWriter, requestObj *http.Request, responseObj response.Response) {
+	var responseBody []byte
+	var responseStatus int
+	var responseHeader http.Header
+
 	defer func() {
 		// Recover should be called directly by a deferred function. https://golang.org/ref/spec#Handling_panics
 		recoveredError := recover()
 		if nil != recoveredError {
-			responseWriter.WriteHeader(http.StatusInternalServerError)
-			responseWriter.Write([]byte(fmt.Sprintf("Failed to send response. Error: %+v", recoveredError)))
+			func() {
+				// Recover panic inside of panic recovery
+				defer func() {
+					recoveryRecoveredError := recover()
+					if nil != recoveryRecoveredError {
+						responseBody = []byte(fmt.Sprintf("Failed to send response. Error: %+v", recoveryRecoveredError))
+						responseStatus = http.StatusInternalServerError
+						responseHeader = make(http.Header)
+					}
+				}()
+
+				responseObj = performRecover(recoveredError, debug.Stack(), responseWriterObj, requestObj)
+
+				// If recovered response is view - set templates to it
+				switch typedResponse := responseObj.(type) {
+				case *response.ViewResponse:
+					if nil == typedResponse.Template {
+						typedResponse.SetTemplate(k.templates)
+					}
+				}
+
+				responseBody = responseObj.GetBodyBytes().Bytes()
+				responseStatus = responseObj.GetHttpStatus()
+				responseHeader = responseObj.GetHeaders()
+			}()
 		}
+
+		// Sending headers
+		for headerName, headerValues := range responseObj.GetHeaders() {
+			for _, value := range headerValues {
+				responseWriterObj.Header().Add(headerName, value)
+			}
+		}
+		responseWriterObj.WriteHeader(responseStatus)
+
+		// Sending body
+		responseWriterObj.Write(responseBody)
 	}()
 
 	if nil == responseObj {
@@ -367,30 +412,13 @@ func (k *Kernel) performResponseSend(responseWriter http.ResponseWriter, request
 
 	// Running ResponseBeforeSend event processing
 	eventBus := GetRequestEventBus(requestObj)
-	responseBeforeSendEvent := event.NewResponseBeforeSend(responseWriter, requestObj, responseObj)
+	responseBeforeSendEvent := event.NewResponseBeforeSend(responseWriterObj, requestObj, responseObj)
 	eventBus.Dispatch(responseBeforeSendEvent)
 
-	// If response is view - execute template and fill response body
-	switch typedResponse := responseObj.(type) {
-	case *response.ViewResponse:
-		if nil == typedResponse.Template {
-			typedResponse.SetTemplate(k.templates)
-		}
-	}
-
-	// Get response body before headers where sent to prevent case "Headers sent -> Panic in responseObj.GetBodyBytes()"
-	responseBody := responseObj.GetBodyBytes().Bytes()
-
-	// Sending headers
-	for headerName, headerValues := range responseObj.GetHeaders() {
-		for _, value := range headerValues {
-			responseWriter.Header().Add(headerName, value)
-		}
-	}
-	responseWriter.WriteHeader(responseObj.GetHttpStatus())
-
-	// Sending body
-	responseWriter.Write(responseBody)
+	// Get response body bytes before headers where sent to prevent case "Headers sent -> Panic in responseObj.GetBodyBytes()"
+	responseBody = responseObj.GetBodyBytes().Bytes()
+	responseStatus = responseObj.GetHttpStatus()
+	responseHeader = responseObj.GetHeaders()
 }
 
 func (k *Kernel) setupGraceShutdown(terminationErrors *[]error) chan bool {
