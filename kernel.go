@@ -32,13 +32,14 @@ const (
 )
 
 type Kernel struct {
-	config         *viper.Viper
-	container      *gioc.Container
-	routes         map[string]*Route
-	eventsRegistry *event_bus.EventsRegistry
-	eventBus       event_bus.EventBus
-	templates      *template.Template
-	httpServer     *http.Server
+	config                  *viper.Viper
+	container               *gioc.Container
+	routes                  map[string]*Route
+	notFoundHandlerEventBus event_bus.EventBus // Event bus for request level events for 404 not found case. Filled with event listeners common for all routes.
+	eventsRegistry          *event_bus.EventsRegistry
+	applicationEventBus     event_bus.EventBus // Event bus for application level events
+	templates               *template.Template
+	httpServer              *http.Server
 }
 
 func (k *Kernel) GetContainer() *gioc.Container {
@@ -64,7 +65,7 @@ func (k *Kernel) GetHttpServer() *http.Server {
 }
 
 func (k *Kernel) RegisterListener(eventObj event.Event, listenerFunc interface{}, priority int) error {
-	return k.eventBus.AppendListener(eventObj, listenerFunc, priority)
+	return k.applicationEventBus.AppendListener(eventObj, listenerFunc, priority)
 }
 
 func (k *Kernel) RegisterListenerForRoute(routeName string, eventObj event.Event, listenerFunc interface{}, priority int) error {
@@ -131,10 +132,10 @@ func (k *Kernel) Run() {
 	vestigo.CustomNotFoundHandlerFunc(k.createNotFoundHandler())
 
 	// Processing of application-level events
-	k.eventBus.Dispatch(event.NewApplicationLaunched(k))
+	k.applicationEventBus.Dispatch(event.NewApplicationLaunched(k))
 
 	terminationErrors := make([]error, 0)
-	defer k.eventBus.Dispatch(event.NewApplicationTermination(k, &terminationErrors))
+	defer k.applicationEventBus.Dispatch(event.NewApplicationTermination(k, &terminationErrors))
 
 	// HTTP Server setup
 	k.httpServer.Handler = router
@@ -169,6 +170,15 @@ func (k *Kernel) readConfig() {
 			panic("failed to read routing common listeners config: " + commonListenersConfigErr.Error())
 		}
 
+		// Register events listeners for 404 Not Found handler
+		for _, listenerConfig := range commonListenersConfig {
+			eventObj, listenerFunc := k.extractHandlerFromListenerConfig(listenerConfig)
+			listenerError := k.notFoundHandlerEventBus.AppendListener(eventObj, listenerFunc, listenerConfig.Priority)
+			if nil != listenerError {
+				panic("failed to register routes common event listener, error: " + listenerError.Error())
+			}
+		}
+
 		for routeName := range k.config.GetStringMap("routing.routes") {
 			routeConfig := &config.RouteConfig{}
 			routeConfigErr := k.config.UnmarshalKey("routing.routes."+routeName, routeConfig)
@@ -189,21 +199,18 @@ func (k *Kernel) readConfig() {
 				Url:        routeConfig.Url,
 				Methods:    routeConfig.Methods,
 				Controller: controller,
+				eventBus:   event_bus.NewEventBus(),
 			})
 
 			// Registering route's event listeners
 			fullPackOfEventListenersConfig := append(routeConfig.EventListeners, commonListenersConfig...)
 			for _, listenerConfig := range fullPackOfEventListenersConfig {
-				listenerObj := k.GetContainer().GetByAlias(listenerConfig.ListenerAlias())
-				eventObj, eventRegistryError := k.eventsRegistry.GetEventByName(listenerConfig.EventName)
-				if nil != eventRegistryError {
-					panic("failed to register event listener to route " + routeName + ", error: " + eventRegistryError.Error())
-				}
+				eventObj, listenerFunc := k.extractHandlerFromListenerConfig(listenerConfig)
 
 				listenerError := k.RegisterListenerForRoute(
 					routeName,
 					eventObj,
-					reflect.ValueOf(listenerObj).MethodByName(listenerConfig.ListenerMethod()).Interface(),
+					listenerFunc,
 					listenerConfig.Priority,
 				)
 				if nil != listenerError {
@@ -251,17 +258,23 @@ func (k *Kernel) readConfig() {
 	}
 }
 
-func (k *Kernel) createRouteHandler(route *Route) http.HandlerFunc {
-	var eventBus event_bus.EventBus
-	// If route has listeners - use that listeners, if no - use global listeners from Kernel
-	if nil != route.eventBus {
-		eventBus = route.eventBus
-	} else {
-		eventBus = k.eventBus
+func (k *Kernel) extractHandlerFromListenerConfig(listenerConfig config.EventListenerConfig) (eventObj event.Event, listenerFunc interface{}) {
+	var eventRegistryError error
+
+	listenerObj := k.GetContainer().GetByAlias(listenerConfig.ListenerAlias())
+	eventObj, eventRegistryError = k.eventsRegistry.GetEventByName(listenerConfig.EventName)
+	if nil != eventRegistryError {
+		panic("failed to extract event handler from event listener config, error: " + eventRegistryError.Error())
 	}
 
+	listenerFunc = reflect.ValueOf(listenerObj).MethodByName(listenerConfig.ListenerMethod()).Interface()
+
+	return
+}
+
+func (k *Kernel) createRouteHandler(route *Route) http.HandlerFunc {
 	return func(responseWriter http.ResponseWriter, requestObj *http.Request) {
-		RequestContextAppend(requestObj, requestCtxEventBusKey, eventBus)
+		RequestContextAppend(requestObj, requestCtxEventBusKey, route.eventBus)
 		responseObj := k.runRequestProcessingFlow(responseWriter, requestObj, route.Controller)
 		k.runSendResponse(responseWriter, requestObj, responseObj)
 	}
@@ -269,7 +282,7 @@ func (k *Kernel) createRouteHandler(route *Route) http.HandlerFunc {
 
 func (k *Kernel) createNotFoundHandler() http.HandlerFunc {
 	return func(responseWriter http.ResponseWriter, requestObj *http.Request) {
-		RequestContextAppend(requestObj, requestCtxEventBusKey, k.eventBus)
+		RequestContextAppend(requestObj, requestCtxEventBusKey, k.notFoundHandlerEventBus)
 		responseObj := k.runNotFoundFlow(responseWriter, requestObj)
 		k.runSendResponse(responseWriter, requestObj, responseObj)
 	}
@@ -474,6 +487,14 @@ func (k *Kernel) runNotFoundFlow(responseWriter http.ResponseWriter, requestObj 
 		responseObj = defaultResponseObj
 	}
 
+	// If returned response is view - set templates to it
+	switch typedResponse := responseObj.(type) {
+	case *response.ViewResponse:
+		if nil == typedResponse.Template {
+			typedResponse.SetTemplate(k.templates)
+		}
+	}
+
 	return
 }
 
@@ -569,13 +590,14 @@ func NewKernel(configPath string) (*Kernel, error) {
 
 	// Creating kernel obj
 	kernel := &Kernel{
-		config:         viper.New(),
-		container:      gioc.NewContainer(),
-		routes:         make(map[string]*Route, 0),
-		eventsRegistry: event_bus.NewDefaultRegistry(),
-		eventBus:       event_bus.NewEventBus(),
-		templates:      template.New("root"),
-		httpServer:     &http.Server{},
+		config:                  viper.New(),
+		container:               gioc.NewContainer(),
+		routes:                  make(map[string]*Route, 0),
+		notFoundHandlerEventBus: event_bus.NewEventBus(),
+		eventsRegistry:          event_bus.NewDefaultRegistry(),
+		applicationEventBus:     event_bus.NewEventBus(),
+		templates:               template.New("root"),
+		httpServer:              &http.Server{},
 	}
 
 	// Copy known config parts to kernel's viper object
