@@ -10,7 +10,7 @@ func NewCommandNotSpecifiedError() *CommandNotSpecifiedError {
 	return &CommandNotSpecifiedError{
 		basicCliError{
 			status:  1,
-			message: "command not found",
+			message: "command not specified",
 		},
 	}
 }

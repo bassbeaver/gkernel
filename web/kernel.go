@@ -31,7 +31,6 @@ import (
 )
 
 const (
-	configServicesPrefix           = "services"
 	configDefaultShutdownTimeoutMs = 500
 	requestCtxEventBusKey          = "event_bus"
 )
@@ -87,29 +86,13 @@ func (k *Kernel) RegisterListenerForRoute(routeName string, eventObj commonEvent
 }
 
 func (k *Kernel) RegisterService(alias string, factoryMethod interface{}, enableCaching bool) error {
-	configServicePath := configServicesPrefix + "." + alias
-	configServiceArgumentsPath := configServicesPrefix + "." + alias + ".arguments"
-	if !k.config.IsSet(configServicePath) {
-		return errors.New(alias + " service configuration not found")
-	}
-
-	var arguments []string
-	if k.config.IsSet(configServiceArgumentsPath) {
-		arguments = k.config.GetStringSlice(configServiceArgumentsPath)
-	} else {
-		arguments = make([]string, 0)
-	}
-
-	k.container.RegisterServiceFactoryByAlias(
+	return helper.RegisterService(
+		k.config,
+		k.container,
 		alias,
-		gioc.Factory{
-			Create:    factoryMethod,
-			Arguments: arguments,
-		},
+		factoryMethod,
 		enableCaching,
 	)
-
-	return nil
 }
 
 func (k *Kernel) Run() {
@@ -537,60 +520,9 @@ func (k *Kernel) performRecover(recoveredError interface{}, trace []byte, respon
 
 func NewKernel(configPath string) (*Kernel, error) {
 	// Read config files to temporary viper object
-	configObj := viper.New()
-
-	var configDir string
-	configPathStat, configPathStatError := os.Stat(configPath)
-	if nil != configPathStatError {
-		return nil, errors.New("failed to read configs: " + configPathStatError.Error())
-	}
-	if configPathStat.IsDir() {
-		configDir = configPath
-	} else {
-		configDir = filepath.Dir(configPath)
-	}
-
-	firstConfigFile := true
-	pathWalkError := filepath.Walk(
-		configDir,
-		func(path string, info os.FileInfo, err error) error {
-			if err != nil {
-				return errors.New("failed to read config file " + path + ", error: " + err.Error())
-			}
-
-			if info.IsDir() {
-				return nil
-			}
-
-			configFilePath := filepath.Dir(path)
-			configFileExt := filepath.Ext(info.Name())
-			// if extension is not allowed - take next file
-			if !helper.StringInSlice(configFileExt[1:], viper.SupportedExts) {
-				return nil
-			}
-
-			configFileName := info.Name()[0 : len(info.Name())-len(configFileExt)]
-
-			configObj.AddConfigPath(configFilePath)
-			configObj.SetConfigName(configFileName)
-
-			if firstConfigFile {
-				if configError := configObj.ReadInConfig(); nil != configError {
-					return configError
-				}
-
-				firstConfigFile = false
-			} else {
-				if configError := configObj.MergeInConfig(); nil != configError {
-					return configError
-				}
-			}
-
-			return nil
-		},
-	)
-	if nil != pathWalkError {
-		return nil, errors.New("failed to read configs: " + pathWalkError.Error())
+	configObj, configBuildError := helper.BuildConfigFromDir(configPath)
+	if nil != configBuildError {
+		return nil, configBuildError
 	}
 
 	// Creating kernel obj
