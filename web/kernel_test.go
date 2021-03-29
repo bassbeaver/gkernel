@@ -1,4 +1,4 @@
-package gkernel
+package web
 
 import "testing"
 

@@ -9,12 +9,10 @@ type InternalServerHttpError struct {
 //--------------------
 
 func NewInternalServerHttpError() *InternalServerHttpError {
-	e := &InternalServerHttpError{
+	return &InternalServerHttpError{
 		basicHttpError{
 			status:  http.StatusInternalServerError,
 			message: http.StatusText(http.StatusInternalServerError),
 		},
 	}
-
-	return e
 }

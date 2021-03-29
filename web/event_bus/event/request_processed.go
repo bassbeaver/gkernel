@@ -1,14 +1,15 @@
 package event
 
 import (
-	"github.com/bassbeaver/gkernel/response"
+	commonEvents "github.com/bassbeaver/gkernel/event_bus/event"
+	"github.com/bassbeaver/gkernel/web/response"
 	"net/http"
 )
 
 type RequestProcessed struct {
 	RequestHolder
 	Respondent
-	Propagator
+	commonEvents.Propagator
 }
 
 func (e *RequestProcessed) SetResponse(responseObj response.Response) {

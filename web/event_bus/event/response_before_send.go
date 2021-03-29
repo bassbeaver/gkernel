@@ -1,14 +1,15 @@
 package event
 
 import (
-	"github.com/bassbeaver/gkernel/response"
+	commonEvents "github.com/bassbeaver/gkernel/event_bus/event"
+	"github.com/bassbeaver/gkernel/web/response"
 	"net/http"
 )
 
 type ResponseBeforeSend struct {
 	RequestHolder
 	ResponseHolder
-	Propagator
+	commonEvents.Propagator
 }
 
 //--------------------

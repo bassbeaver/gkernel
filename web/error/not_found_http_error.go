@@ -9,12 +9,10 @@ type NotFoundHttpError struct {
 //--------------------
 
 func NewNotFoundHttpError() *NotFoundHttpError {
-	e := &NotFoundHttpError{
+	return &NotFoundHttpError{
 		basicHttpError{
 			status:  http.StatusNotFound,
 			message: http.StatusText(http.StatusNotFound),
 		},
 	}
-
-	return e
 }

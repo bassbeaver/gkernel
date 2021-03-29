@@ -1,5 +1,7 @@
 package config
 
+import "github.com/bassbeaver/gkernel/helper"
+
 type EventListenerConfig struct {
 	EventName string `mapstructure:"Event"`
 	Listener  string
@@ -7,9 +9,9 @@ type EventListenerConfig struct {
 }
 
 func (c *EventListenerConfig) ListenerAlias() string {
-	return getStringPart(c.Listener, 0)
+	return helper.GetStringPart(c.Listener, ":", 0)
 }
 
 func (c *EventListenerConfig) ListenerMethod() string {
-	return getStringPart(c.Listener, 1)
+	return helper.GetStringPart(c.Listener, ":", 1)
 }
