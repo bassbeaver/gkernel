@@ -90,7 +90,7 @@ func (k *Kernel) readConfig() cliKernelError.CliError {
 	if k.config.IsSet("cli") {
 		for commandLabel := range k.config.GetStringMap("cli.commands") {
 			commandConfig := &cliConfig.CommandConfig{}
-			commandConfigErr := k.config.UnmarshalKey("routing.routes."+commandLabel, commandConfig)
+			commandConfigErr := k.config.UnmarshalKey("cli.commands."+commandLabel, commandConfig)
 			if nil != commandConfigErr {
 				return cliKernelError.NewRuntimeError("failed to read cli commands config: " + commandConfigErr.Error())
 			}
