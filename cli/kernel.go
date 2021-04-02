@@ -145,7 +145,7 @@ func (k *Kernel) FormatHelp() string {
 	var result string = "Usage: \n"
 
 	for _, command := range k.commands {
-		result += command.FormatHelp() + "\n"
+		result += command.FormatHelp()
 	}
 
 	return result

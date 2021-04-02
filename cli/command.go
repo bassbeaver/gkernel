@@ -14,7 +14,7 @@ type Command struct {
 }
 
 func (c *Command) FormatHelp() string {
-	return fmt.Sprintf("  %s\t%s", c.Name, c.Help)
+	return fmt.Sprintf("  %s\t%s\n", c.Name, c.Help)
 }
 
 func NewCommand(name string, controller Controller, help string) *Command {

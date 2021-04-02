@@ -96,10 +96,10 @@ func (k *Kernel) RegisterService(alias string, factoryMethod interface{}, enable
 }
 
 func (k *Kernel) Run() {
-	if !k.config.IsSet("http_port") {
+	if !k.config.IsSet("web.http_port") {
 		panic("Failed to start application, http port to serve not configured")
 	}
-	portNum := k.config.GetInt("http_port")
+	portNum := k.config.GetInt("web.http_port")
 
 	if noCycles, cycledService := k.container.CheckCycles(); !noCycles {
 		panic("Failed to start application, errors in DI container: service " + cycledService + " has circular dependencies")
@@ -142,18 +142,18 @@ func (k *Kernel) Run() {
 
 func (k *Kernel) readConfig() {
 	// Parsing templates if templates are configured
-	if k.config.IsSet("templates_path") {
-		templateError := k.parseTemplatesPath(k.config.GetString("templates_path"))
+	if k.config.IsSet("web.templates_path") {
+		templateError := k.parseTemplatesPath(k.config.GetString("web.templates_path"))
 		if nil != templateError {
 			panic(templateError)
 		}
 	}
 
 	// Parsing routing config
-	if k.config.IsSet("routing") {
+	if k.config.IsSet("web.routing") {
 		// Creating list of common event listeners
 		commonListenersConfig := make([]commonConfig.EventListenerConfig, 0)
-		commonListenersConfigErr := k.config.UnmarshalKey("routing.event_listeners", &commonListenersConfig)
+		commonListenersConfigErr := k.config.UnmarshalKey("web.routing.event_listeners", &commonListenersConfig)
 		if nil != commonListenersConfigErr {
 			panic("failed to read routing common listeners config: " + commonListenersConfigErr.Error())
 		}
@@ -167,9 +167,9 @@ func (k *Kernel) readConfig() {
 			}
 		}
 
-		for routeName := range k.config.GetStringMap("routing.routes") {
+		for routeName := range k.config.GetStringMap("web.routing.routes") {
 			routeConfig := &webConfig.RouteConfig{}
-			routeConfigErr := k.config.UnmarshalKey("routing.routes."+routeName, routeConfig)
+			routeConfigErr := k.config.UnmarshalKey("web.routing.routes."+routeName, routeConfig)
 			if nil != routeConfigErr {
 				panic("failed to read routing config: " + routeConfigErr.Error())
 			}
@@ -545,7 +545,7 @@ func NewKernel(configPath string) (*Kernel, error) {
 			}
 		}
 	}(
-		[]string{"http_port", "templates_path", "shutdown_timeout", "services", "routing", "event_listeners"},
+		[]string{"app_env", "shutdown_timeout", "services", "web", "cli", "event_listeners"},
 		configObj,
 		kernel.config,
 	)
