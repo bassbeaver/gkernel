@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"fmt"
 	cliKernelError "github.com/bassbeaver/gkernel/cli/error"
 )
 
@@ -10,6 +11,10 @@ type Command struct {
 	Name       string
 	Controller Controller
 	Help       string
+}
+
+func (c *Command) FormatHelp() string {
+	return fmt.Sprintf("  %s\t%s", c.Name, c.Help)
 }
 
 func NewCommand(name string, controller Controller, help string) *Command {

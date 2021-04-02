@@ -2,6 +2,7 @@ package cli
 
 import (
 	"errors"
+	"flag"
 	"fmt"
 	"github.com/bassbeaver/gioc"
 	cliConfig "github.com/bassbeaver/gkernel/cli/config"
@@ -12,12 +13,14 @@ import (
 	commonEvent "github.com/bassbeaver/gkernel/event_bus/event"
 	"github.com/bassbeaver/gkernel/helper"
 	"github.com/spf13/viper"
+	"io/ioutil"
 	"os"
 	"reflect"
 )
 
 type Kernel struct {
 	config              *viper.Viper
+	configIsRead        bool
 	container           *gioc.Container
 	commands            map[string]*Command
 	eventsRegistry      *commonEventBus.EventsRegistry
@@ -51,12 +54,8 @@ func (k *Kernel) RegisterService(alias string, factoryMethod interface{}, enable
 }
 
 func (k *Kernel) Run(args []string) cliKernelError.CliError {
-	if 0 == len(args) {
-		return cliKernelError.NewCommandNotSpecifiedError()
-	}
-
 	if noCycles, cycledService := k.container.CheckCycles(); !noCycles {
-		return cliKernelError.NewRuntimeError("Failed to start application, errors in DI container: service " + cycledService + " has circular dependencies")
+		return cliKernelError.NewRuntimeError("Failed to start Kernel, errors in DI container: service " + cycledService + " has circular dependencies")
 	}
 
 	// Config files reading
@@ -65,13 +64,46 @@ func (k *Kernel) Run(args []string) cliKernelError.CliError {
 		return configError
 	}
 
+	// Check if common help flag requested
+	helpFlagsSet := flag.NewFlagSet("", flag.ContinueOnError)
+	helpFlagsSet.SetOutput(ioutil.Discard) // Disabling native output of flag package
+
+	helpFlag := helpFlagsSet.Bool("help", false, "Output help")
+	helpFlagsSet.BoolVar(helpFlag, "h", false, "Output help (shorthand)")
+
+	flagsErr := helpFlagsSet.Parse(args)
+	if nil != flagsErr {
+		return cliKernelError.NewRuntimeError("Failed to parse Kernel CLI arguments, error: " + flagsErr.Error())
+	}
+	if *helpFlag {
+		fmt.Printf(k.FormatHelp())
+
+		return nil
+	}
+
 	// Determine command
-	commandName := args[0]
-	args = args[1:]
+	commonArgsWithoutHelp := helpFlagsSet.Args()
+
+	if 0 == len(commonArgsWithoutHelp) {
+		return cliKernelError.NewCommandNotSpecifiedError()
+	}
+
+	commandName := commonArgsWithoutHelp[0]
+	commandArgs := commonArgsWithoutHelp[1:]
 
 	command, commandExists := k.commands[commandName]
 	if !commandExists {
 		return cliKernelError.NewCommandNotFoundError()
+	}
+
+	// Check if command level help flag requested. Ignoring parsing errors because we only need  to determine if help flag was set or not.
+	_ = helpFlagsSet.Parse(commandArgs)
+	if *helpFlag {
+		var helpString string = "Usage: \n"
+		helpString += command.FormatHelp()
+		fmt.Printf(helpString)
+
+		return nil
 	}
 
 	// Processing of application-level events
@@ -80,9 +112,43 @@ func (k *Kernel) Run(args []string) cliKernelError.CliError {
 	terminationErrors := make([]error, 0)
 	defer k.applicationEventBus.Dispatch(commonEvent.NewApplicationTermination(k, &terminationErrors))
 
-	// Run command
+	// Run command processing
 
-	return command.Controller(args)
+	return command.Controller(commandArgs)
+}
+
+func (k *Kernel) GetHelp() map[string]string {
+	if !k.configIsRead {
+		configError := k.readConfig()
+		if nil != configError {
+			panic(configError)
+		}
+	}
+
+	result := make(map[string]string)
+
+	for commandName, command := range k.commands {
+		result[commandName] = command.Help
+	}
+
+	return result
+}
+
+func (k *Kernel) FormatHelp() string {
+	if !k.configIsRead {
+		configError := k.readConfig()
+		if nil != configError {
+			panic(configError)
+		}
+	}
+
+	var result string = "Usage: \n"
+
+	for _, command := range k.commands {
+		result += command.FormatHelp() + "\n"
+	}
+
+	return result
 }
 
 func (k *Kernel) readConfig() cliKernelError.CliError {
@@ -150,6 +216,8 @@ func (k *Kernel) readConfig() cliKernelError.CliError {
 			}
 		}
 	}
+
+	k.configIsRead = true
 
 	return nil
 }
