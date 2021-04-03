@@ -415,7 +415,7 @@ func (k *Kernel) performResponseSend(responseWriterObj http.ResponseWriter, requ
 }
 
 func (k *Kernel) setupGraceShutdown(terminationErrors *[]error) chan bool {
-	shutdownTimeout := k.config.GetDuration("shutdown_timeout")
+	shutdownTimeout := k.config.GetDuration("web.shutdown_timeout")
 	if 0 >= shutdownTimeout {
 		shutdownTimeout = configDefaultShutdownTimeoutMs
 	}
@@ -545,7 +545,7 @@ func NewKernel(configPath string) (*Kernel, error) {
 			}
 		}
 	}(
-		[]string{"app_env", "shutdown_timeout", "services", "web", "cli", "event_listeners"},
+		[]string{"services", "web", "cli", "event_listeners"},
 		configObj,
 		kernel.config,
 	)
