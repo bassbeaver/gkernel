@@ -1,8 +1,8 @@
-package gkernel
+package web
 
 import (
 	"github.com/bassbeaver/gkernel/event_bus"
-	"github.com/bassbeaver/gkernel/response"
+	"github.com/bassbeaver/gkernel/web/response"
 	"net/http"
 )
 

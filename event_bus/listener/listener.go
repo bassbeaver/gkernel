@@ -9,16 +9,6 @@ type ApplicationLaunched func(*event.ApplicationLaunched)
 
 type ApplicationTermination func(*event.ApplicationTermination)
 
-type RequestReceived func(*event.RequestReceived)
-
-type RequestProcessed func(*event.RequestProcessed)
-
-type ResponseBeforeSend func(*event.ResponseBeforeSend)
-
-type RequestTermination func(*event.RequestTermination)
-
-type RuntimeError func(*event.RequestTermination)
-
 //--------------------
 
 // listener - should be a function with one argument, that argument should be a pointer to the Event object

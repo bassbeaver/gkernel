@@ -9,12 +9,10 @@ type UnauthorizedHttpError struct {
 //--------------------
 
 func NewUnauthorizedHttpError() *UnauthorizedHttpError {
-	e := &UnauthorizedHttpError{
+	return &UnauthorizedHttpError{
 		basicHttpError{
 			status:  http.StatusUnauthorized,
 			message: http.StatusText(http.StatusUnauthorized),
 		},
 	}
-
-	return e
 }

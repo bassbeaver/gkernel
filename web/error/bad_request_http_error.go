@@ -9,12 +9,10 @@ type BadRequestHttpError struct {
 //--------------------
 
 func NewBadRequestHttpError() *BadRequestHttpError {
-	e := &BadRequestHttpError{
+	return &BadRequestHttpError{
 		basicHttpError{
 			status:  http.StatusBadRequest,
 			message: http.StatusText(http.StatusBadRequest),
 		},
 	}
-
-	return e
 }

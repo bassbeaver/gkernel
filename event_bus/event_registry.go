@@ -9,11 +9,6 @@ import (
 const (
 	KernelEventApplicationLaunched    = "kernelEvent.ApplicationLaunched"
 	KernelEventApplicationTermination = "kernelEvent.ApplicationTermination"
-	KernelEventRequestReceived        = "kernelEvent.RequestReceived"
-	KernelEventRequestProcessed       = "kernelEvent.RequestProcessed"
-	KernelEventResponseBeforeSend     = "kernelEvent.ResponseBeforeSend"
-	KernelEventRequestTermination     = "kernelEvent.RequestTermination"
-	KernelEventRuntimeError           = "kernelEvent.RuntimeError"
 )
 
 type EventsRegistry struct {
@@ -41,18 +36,8 @@ func (r *EventsRegistry) GetEventByName(name string) (event.Event, error) {
 
 //--------------------
 
-func NewDefaultRegistry() *EventsRegistry {
-	r := &EventsRegistry{
+func NewRegistry() *EventsRegistry {
+	return &EventsRegistry{
 		registry: make(map[string]event.Event),
 	}
-
-	r.Register(KernelEventApplicationLaunched, (*event.ApplicationLaunched)(nil))
-	r.Register(KernelEventApplicationTermination, (*event.ApplicationTermination)(nil))
-	r.Register(KernelEventRequestReceived, (*event.RequestReceived)(nil))
-	r.Register(KernelEventRequestProcessed, (*event.RequestProcessed)(nil))
-	r.Register(KernelEventResponseBeforeSend, (*event.ResponseBeforeSend)(nil))
-	r.Register(KernelEventRequestTermination, (*event.RequestTermination)(nil))
-	r.Register(KernelEventRuntimeError, (*event.RuntimeError)(nil))
-
-	return r
 }

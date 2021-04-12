@@ -1,15 +1,20 @@
-package gkernel
+package web
 
 import (
 	"context"
 	"errors"
 	"fmt"
 	"github.com/bassbeaver/gioc"
-	"github.com/bassbeaver/gkernel/config"
-	kernelError "github.com/bassbeaver/gkernel/error"
-	"github.com/bassbeaver/gkernel/event_bus"
-	"github.com/bassbeaver/gkernel/event_bus/event"
-	"github.com/bassbeaver/gkernel/response"
+	commonConfig "github.com/bassbeaver/gkernel/config"
+	commonKernelError "github.com/bassbeaver/gkernel/error"
+	commonEventBus "github.com/bassbeaver/gkernel/event_bus"
+	commonEvent "github.com/bassbeaver/gkernel/event_bus/event"
+	"github.com/bassbeaver/gkernel/helper"
+	webConfig "github.com/bassbeaver/gkernel/web/config"
+	webKernelError "github.com/bassbeaver/gkernel/web/error"
+	webEventBus "github.com/bassbeaver/gkernel/web/event_bus"
+	webEvent "github.com/bassbeaver/gkernel/web/event_bus/event"
+	"github.com/bassbeaver/gkernel/web/response"
 	"github.com/husobee/vestigo"
 	"github.com/spf13/viper"
 	"html/template"
@@ -26,7 +31,6 @@ import (
 )
 
 const (
-	configServicesPrefix           = "services"
 	configDefaultShutdownTimeoutMs = 500
 	requestCtxEventBusKey          = "event_bus"
 )
@@ -35,9 +39,9 @@ type Kernel struct {
 	config                  *viper.Viper
 	container               *gioc.Container
 	routes                  map[string]*Route
-	notFoundHandlerEventBus event_bus.EventBus // Event bus for request level events for 404 not found case. Filled with event listeners common for all routes.
-	eventsRegistry          *event_bus.EventsRegistry
-	applicationEventBus     event_bus.EventBus // Event bus for application level events
+	notFoundHandlerEventBus commonEventBus.EventBus // Event bus for request level events for 404 not found case. Filled with event listeners common for all routes.
+	eventsRegistry          *commonEventBus.EventsRegistry
+	applicationEventBus     commonEventBus.EventBus // Event bus for application level events
 	templates               *template.Template
 	httpServer              *http.Server
 }
@@ -46,7 +50,7 @@ func (k *Kernel) GetContainer() *gioc.Container {
 	return k.container
 }
 
-func (k *Kernel) GetEventsRegistry() *event_bus.EventsRegistry {
+func (k *Kernel) GetEventsRegistry() *commonEventBus.EventsRegistry {
 	return k.eventsRegistry
 }
 
@@ -64,54 +68,38 @@ func (k *Kernel) GetHttpServer() *http.Server {
 	return k.httpServer
 }
 
-func (k *Kernel) RegisterListener(eventObj event.Event, listenerFunc interface{}, priority int) error {
+func (k *Kernel) RegisterListener(eventObj commonEvent.Event, listenerFunc interface{}, priority int) error {
 	return k.applicationEventBus.AppendListener(eventObj, listenerFunc, priority)
 }
 
-func (k *Kernel) RegisterListenerForRoute(routeName string, eventObj event.Event, listenerFunc interface{}, priority int) error {
+func (k *Kernel) RegisterListenerForRoute(routeName string, eventObj commonEvent.Event, listenerFunc interface{}, priority int) error {
 	route, routeExists := k.routes[routeName]
 	if !routeExists {
 		return errors.New("route " + routeName + " not exists")
 	}
 
 	if nil == route.eventBus {
-		route.eventBus = event_bus.NewEventBus()
+		route.eventBus = commonEventBus.NewEventBus()
 	}
 
 	return route.eventBus.AppendListener(eventObj, listenerFunc, priority)
 }
 
 func (k *Kernel) RegisterService(alias string, factoryMethod interface{}, enableCaching bool) error {
-	configServicePath := configServicesPrefix + "." + alias
-	configServiceArgumentsPath := configServicesPrefix + "." + alias + ".arguments"
-	if !k.config.IsSet(configServicePath) {
-		return errors.New(alias + " service configuration not found")
-	}
-
-	var arguments []string
-	if k.config.IsSet(configServiceArgumentsPath) {
-		arguments = k.config.GetStringSlice(configServiceArgumentsPath)
-	} else {
-		arguments = make([]string, 0)
-	}
-
-	k.container.RegisterServiceFactoryByAlias(
+	return helper.RegisterService(
+		k.config,
+		k.container,
 		alias,
-		gioc.Factory{
-			Create:    factoryMethod,
-			Arguments: arguments,
-		},
+		factoryMethod,
 		enableCaching,
 	)
-
-	return nil
 }
 
 func (k *Kernel) Run() {
-	if !k.config.IsSet("http_port") {
+	if !k.config.IsSet("web.http_port") {
 		panic("Failed to start application, http port to serve not configured")
 	}
-	portNum := k.config.GetInt("http_port")
+	portNum := k.config.GetInt("web.http_port")
 
 	if noCycles, cycledService := k.container.CheckCycles(); !noCycles {
 		panic("Failed to start application, errors in DI container: service " + cycledService + " has circular dependencies")
@@ -132,10 +120,10 @@ func (k *Kernel) Run() {
 	vestigo.CustomNotFoundHandlerFunc(k.createNotFoundHandler())
 
 	// Processing of application-level events
-	k.applicationEventBus.Dispatch(event.NewApplicationLaunched(k))
+	k.applicationEventBus.Dispatch(commonEvent.NewApplicationLaunched(k))
 
 	terminationErrors := make([]error, 0)
-	defer k.applicationEventBus.Dispatch(event.NewApplicationTermination(k, &terminationErrors))
+	defer k.applicationEventBus.Dispatch(commonEvent.NewApplicationTermination(k, &terminationErrors))
 
 	// HTTP Server setup
 	k.httpServer.Handler = router
@@ -154,18 +142,18 @@ func (k *Kernel) Run() {
 
 func (k *Kernel) readConfig() {
 	// Parsing templates if templates are configured
-	if k.config.IsSet("templates_path") {
-		templateError := k.parseTemplatesPath(k.config.GetString("templates_path"))
+	if k.config.IsSet("web.templates_path") {
+		templateError := k.parseTemplatesPath(k.config.GetString("web.templates_path"))
 		if nil != templateError {
 			panic(templateError)
 		}
 	}
 
 	// Parsing routing config
-	if k.config.IsSet("routing") {
+	if k.config.IsSet("web.routing") {
 		// Creating list of common event listeners
-		commonListenersConfig := make([]config.EventListenerConfig, 0)
-		commonListenersConfigErr := k.config.UnmarshalKey("routing.event_listeners", &commonListenersConfig)
+		commonListenersConfig := make([]commonConfig.EventListenerConfig, 0)
+		commonListenersConfigErr := k.config.UnmarshalKey("web.routing.event_listeners", &commonListenersConfig)
 		if nil != commonListenersConfigErr {
 			panic("failed to read routing common listeners config: " + commonListenersConfigErr.Error())
 		}
@@ -179,9 +167,9 @@ func (k *Kernel) readConfig() {
 			}
 		}
 
-		for routeName := range k.config.GetStringMap("routing.routes") {
-			routeConfig := &config.RouteConfig{}
-			routeConfigErr := k.config.UnmarshalKey("routing.routes."+routeName, routeConfig)
+		for routeName := range k.config.GetStringMap("web.routing.routes") {
+			routeConfig := &webConfig.RouteConfig{}
+			routeConfigErr := k.config.UnmarshalKey("web.routing.routes."+routeName, routeConfig)
 			if nil != routeConfigErr {
 				panic("failed to read routing config: " + routeConfigErr.Error())
 			}
@@ -199,7 +187,7 @@ func (k *Kernel) readConfig() {
 				Url:        routeConfig.Url,
 				Methods:    routeConfig.Methods,
 				Controller: controller,
-				eventBus:   event_bus.NewEventBus(),
+				eventBus:   commonEventBus.NewEventBus(),
 			})
 
 			// Registering route's event listeners
@@ -222,13 +210,13 @@ func (k *Kernel) readConfig() {
 
 	// Parsing config for application level event listeners
 	if k.config.IsSet("event_listeners") {
-		applicationLevelListenersConfig := make([]config.EventListenerConfig, 0)
+		applicationLevelListenersConfig := make([]commonConfig.EventListenerConfig, 0)
 		commonListenersConfigErr := k.config.UnmarshalKey("event_listeners", &applicationLevelListenersConfig)
 		if nil != commonListenersConfigErr {
 			panic("failed to read application level event listeners config, error: " + commonListenersConfigErr.Error())
 		}
 
-		errorHandler := func(lc config.EventListenerConfig, err error) {
+		errorHandler := func(lc commonConfig.EventListenerConfig, err error) {
 			if nil == err {
 				return
 			}
@@ -258,7 +246,7 @@ func (k *Kernel) readConfig() {
 	}
 }
 
-func (k *Kernel) extractHandlerFromListenerConfig(listenerConfig config.EventListenerConfig) (eventObj event.Event, listenerFunc interface{}) {
+func (k *Kernel) extractHandlerFromListenerConfig(listenerConfig commonConfig.EventListenerConfig) (eventObj commonEvent.Event, listenerFunc interface{}) {
 	var eventRegistryError error
 
 	listenerObj := k.GetContainer().GetByAlias(listenerConfig.ListenerAlias())
@@ -335,7 +323,7 @@ func (k *Kernel) runRequestProcessingFlow(
 	eventBus := GetRequestEventBus(requestObj)
 
 	// Running RequestReceived event processing
-	requestReceivedEvent := event.NewRequestReceived(responseWriterObj, requestObj)
+	requestReceivedEvent := webEvent.NewRequestReceived(responseWriterObj, requestObj)
 	eventBus.Dispatch(requestReceivedEvent)
 	responseObj = requestReceivedEvent.GetResponse()
 
@@ -355,7 +343,7 @@ func (k *Kernel) runRequestProcessingFlow(
 		}
 
 		// Running RequestProcessed event processing
-		requestProcessedEvent := event.NewRequestProcessed(responseWriterObj, requestObj, responseObj)
+		requestProcessedEvent := webEvent.NewRequestProcessed(responseWriterObj, requestObj, responseObj)
 		eventBus.Dispatch(requestProcessedEvent)
 		responseObj = requestProcessedEvent.GetResponse()
 	}
@@ -405,7 +393,7 @@ func (k *Kernel) performResponseSend(responseWriterObj http.ResponseWriter, requ
 		responseWriterObj.WriteHeader(responseStatus)
 
 		// Sending body
-		responseWriterObj.Write(responseBody)
+		_, _ = responseWriterObj.Write(responseBody)
 	}()
 
 	if nil == responseObj {
@@ -417,7 +405,7 @@ func (k *Kernel) performResponseSend(responseWriterObj http.ResponseWriter, requ
 
 	// Running ResponseBeforeSend event processing
 	eventBus := GetRequestEventBus(requestObj)
-	responseBeforeSendEvent := event.NewResponseBeforeSend(responseWriterObj, requestObj, responseObj)
+	responseBeforeSendEvent := webEvent.NewResponseBeforeSend(responseWriterObj, requestObj, responseObj)
 	eventBus.Dispatch(responseBeforeSendEvent)
 
 	// Get response body bytes before headers where sent to prevent case "Headers sent -> Panic in responseObj.GetBodyBytes()"
@@ -427,7 +415,7 @@ func (k *Kernel) performResponseSend(responseWriterObj http.ResponseWriter, requ
 }
 
 func (k *Kernel) setupGraceShutdown(terminationErrors *[]error) chan bool {
-	shutdownTimeout := k.config.GetDuration("shutdown_timeout")
+	shutdownTimeout := k.config.GetDuration("web.shutdown_timeout")
 	if 0 >= shutdownTimeout {
 		shutdownTimeout = configDefaultShutdownTimeoutMs
 	}
@@ -474,8 +462,8 @@ func (k *Kernel) runNotFoundFlow(responseWriter http.ResponseWriter, requestObj 
 
 	eventBus := GetRequestEventBus(requestObj)
 
-	errorObj := kernelError.NewNotFoundHttpError()
-	runtimeErrorEvent := event.NewRuntimeError(responseWriter, requestObj, kernelError.NewRuntimeError(errorObj, nil))
+	errorObj := webKernelError.NewNotFoundHttpError()
+	runtimeErrorEvent := webEvent.NewRuntimeError(responseWriter, requestObj, commonKernelError.NewRuntimeError(errorObj, nil))
 	eventBus.Dispatch(runtimeErrorEvent)
 	responseObj = runtimeErrorEvent.GetResponse()
 
@@ -501,11 +489,11 @@ func (k *Kernel) runNotFoundFlow(responseWriter http.ResponseWriter, requestObj 
 func (k *Kernel) performRecover(recoveredError interface{}, trace []byte, responseWriterObj http.ResponseWriter, requestObj *http.Request) response.Response {
 	var responseObj response.Response
 
-	runtimeError := kernelError.NewRuntimeError(recoveredError, trace)
+	runtimeError := commonKernelError.NewRuntimeError(recoveredError, trace)
 
 	eventBus := GetRequestEventBus(requestObj)
 
-	runtimeErrorEvent := event.NewRuntimeError(responseWriterObj, requestObj, runtimeError)
+	runtimeErrorEvent := webEvent.NewRuntimeError(responseWriterObj, requestObj, runtimeError)
 	eventBus.Dispatch(runtimeErrorEvent)
 	responseObj = runtimeErrorEvent.GetResponse()
 
@@ -532,60 +520,9 @@ func (k *Kernel) performRecover(recoveredError interface{}, trace []byte, respon
 
 func NewKernel(configPath string) (*Kernel, error) {
 	// Read config files to temporary viper object
-	configObj := viper.New()
-
-	var configDir string
-	configPathStat, configPathStatError := os.Stat(configPath)
-	if nil != configPathStatError {
-		return nil, errors.New("failed to read configs: " + configPathStatError.Error())
-	}
-	if configPathStat.IsDir() {
-		configDir = configPath
-	} else {
-		configDir = filepath.Dir(configPath)
-	}
-
-	firstConfigFile := true
-	pathWalkError := filepath.Walk(
-		configDir,
-		func(path string, info os.FileInfo, err error) error {
-			if err != nil {
-				return errors.New("failed to read config file " + path + ", error: " + err.Error())
-			}
-
-			if info.IsDir() {
-				return nil
-			}
-
-			configFilePath := filepath.Dir(path)
-			configFileExt := filepath.Ext(info.Name())
-			// if extension is not allowed - take next file
-			if !stringInSlice(configFileExt[1:], viper.SupportedExts) {
-				return nil
-			}
-
-			configFileName := info.Name()[0 : len(info.Name())-len(configFileExt)]
-
-			configObj.AddConfigPath(configFilePath)
-			configObj.SetConfigName(configFileName)
-
-			if firstConfigFile {
-				if configError := configObj.ReadInConfig(); nil != configError {
-					return configError
-				}
-
-				firstConfigFile = false
-			} else {
-				if configError := configObj.MergeInConfig(); nil != configError {
-					return configError
-				}
-			}
-
-			return nil
-		},
-	)
-	if nil != pathWalkError {
-		return nil, errors.New("failed to read configs: " + pathWalkError.Error())
+	configObj, configBuildError := helper.BuildConfigFromDir(configPath)
+	if nil != configBuildError {
+		return nil, configBuildError
 	}
 
 	// Creating kernel obj
@@ -593,9 +530,9 @@ func NewKernel(configPath string) (*Kernel, error) {
 		config:                  viper.New(),
 		container:               gioc.NewContainer(),
 		routes:                  make(map[string]*Route, 0),
-		notFoundHandlerEventBus: event_bus.NewEventBus(),
-		eventsRegistry:          event_bus.NewDefaultRegistry(),
-		applicationEventBus:     event_bus.NewEventBus(),
+		notFoundHandlerEventBus: commonEventBus.NewEventBus(),
+		eventsRegistry:          webEventBus.NewDefaultRegistry(),
+		applicationEventBus:     commonEventBus.NewEventBus(),
 		templates:               template.New("root"),
 		httpServer:              &http.Server{},
 	}
@@ -608,7 +545,7 @@ func NewKernel(configPath string) (*Kernel, error) {
 			}
 		}
 	}(
-		[]string{"http_port", "templates_path", "shutdown_timeout", "services", "routing", "event_listeners"},
+		[]string{"services", "web", "cli", "event_listeners"},
 		configObj,
 		kernel.config,
 	)
@@ -632,14 +569,14 @@ func NewKernel(configPath string) (*Kernel, error) {
 //--------------------
 
 func performRequestTermination(requestObj *http.Request, responseObj response.Response) {
-	requestTerminationEvent := event.NewRequestTermination(requestObj, responseObj)
+	requestTerminationEvent := webEvent.NewRequestTermination(requestObj, responseObj)
 	GetRequestEventBus(requestObj).Dispatch(requestTerminationEvent)
 }
 
-func GetRequestEventBus(requestObj *http.Request) event_bus.EventBus {
+func GetRequestEventBus(requestObj *http.Request) commonEventBus.EventBus {
 	eventBus := requestObj.Context().Value(requestCtxEventBusKey)
 	if nil != eventBus {
-		if eventBusTyped, isEventBus := eventBus.(event_bus.EventBus); isEventBus {
+		if eventBusTyped, isEventBus := eventBus.(commonEventBus.EventBus); isEventBus {
 			return eventBusTyped
 		}
 	}
@@ -650,14 +587,4 @@ func GetRequestEventBus(requestObj *http.Request) event_bus.EventBus {
 func RequestContextAppend(requestObj *http.Request, key, val interface{}) {
 	newContext := context.WithValue(requestObj.Context(), key, val)
 	*requestObj = *requestObj.WithContext(newContext)
-}
-
-func stringInSlice(a string, list []string) bool {
-	for _, b := range list {
-		if b == a {
-			return true
-		}
-	}
-
-	return false
 }
