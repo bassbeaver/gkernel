@@ -19,8 +19,9 @@ Main structure blocks of **gkernel** are:
 
 * **Service Container** or just **Container**, entity to provide service location and [dependency injection](https://wikipedia.org/wiki/Dependency_injection). [bassbeaver/gioc](https://github.com/bassbeaver/gioc) is used for it.
 * **Request** - represents an HTTP request received by a server. Gkernel uses standard [net/http](https://golang.org/pkg/net/http/) Request type. 
-* **Response** - instance, encapsulating data, that should be sent to user as a result of request
+* **Response** - instance, encapsulating data, that should be sent to user as a result of HTTP request.
 * **Route** - instance describing bindings between request (http method, url) and controller. Also route has its own event bus.
+* **Command** - instance describing console command passed to programm in CLI environment.
 * **Controller** - instance to process request.
 * **Event** - instance indicating that something has happened in system. **Events** are processed via **event buses** and **event listeners**.
 
