@@ -27,7 +27,7 @@ func (h *RequestHolder) GetResponseWriter() http.ResponseWriter {
 
 //--------------------
 
-// Provides access to response but does not allow response changes
+// ResponseHolder Provides access to response but does not allow response changes
 type ResponseHolder struct {
 	responseObj response.Response
 }
@@ -38,7 +38,7 @@ func (r *ResponseHolder) GetResponse() response.Response {
 
 //--------------------
 
-// Provides access to response and allows response setting/replacement
+// Respondent Provides access to response and allows response setting/replacement
 type Respondent struct {
 	ResponseHolder
 }
@@ -49,7 +49,7 @@ func (r *Respondent) SetResponse(responseObj response.Response) {
 
 //--------------------
 
-// Provides access to response, allows response setting/replacement, interrupts event propagation after response is set
+// StoppingRespondent Provides access to response, allows response setting/replacement, interrupts event propagation after response is set
 type StoppingRespondent struct {
 	Respondent
 	commonEvent.Propagator
