@@ -25,6 +25,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime/debug"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -33,6 +34,11 @@ import (
 const (
 	configDefaultShutdownTimeoutMs = 500
 	requestCtxEventBusKey          = "event_bus"
+	defaultReadHeaderTimeoutMs     = 5000
+	defaultReadTimeoutMs           = 15000
+	defaultWriteTimeoutMs          = 30000
+	defaultIdleTimeoutMs           = 15000
+	defaultRouteTimeoutMs          = 20000
 )
 
 type Kernel struct {
@@ -174,20 +180,52 @@ func (k *Kernel) readConfig() {
 				panic("failed to read routing config: " + routeConfigErr.Error())
 			}
 
-			// Registering route
+			// Determining controller
 			controllerObj := k.GetContainer().GetByAlias(routeConfig.ControllerAlias())
 			controllerMethodValue := reflect.ValueOf(controllerObj).MethodByName(routeConfig.ControllerMethod())
 			if (reflect.Value{}) == controllerMethodValue {
-				panic(fmt.Sprintf("method %s not found in controller object %s", routeConfig.ControllerMethod(), routeConfig.ControllerAlias()))
+				panic(fmt.Sprintf("method %s not found in Controller object %s", routeConfig.ControllerMethod(), routeConfig.ControllerAlias()))
 			}
 			controller := controllerMethodValue.Interface().(func(*http.Request) response.Response)
 
+			// Determining route timeout and timeout handler
+			var routeTimeoutValue int
+			if "" == routeConfig.Timeout {
+				routeTimeoutValue = defaultRouteTimeoutMs
+			} else {
+				var routeTimeoutValueError error
+				routeTimeoutValue, routeTimeoutValueError = strconv.Atoi(routeConfig.Timeout)
+				if nil != routeTimeoutValueError {
+					panic(fmt.Sprintf(
+						"route '%s %s' has non-integer value of timeout (%s)",
+						strings.Join(routeConfig.Methods, " "),
+						routeConfig.Url,
+						routeConfig.Timeout,
+					))
+				}
+			}
+
+			var routeTimeoutHandler TimeoutHandler
+			if "" == routeConfig.TimeoutHandler {
+				routeTimeoutHandler = func() (int, string) { return http.StatusServiceUnavailable, "timeout" }
+			} else {
+				timeoutHandlerObj := k.GetContainer().GetByAlias(routeConfig.TimeoutHandlerAlias())
+				timeoutHandlerMethodValue := reflect.ValueOf(timeoutHandlerObj).MethodByName(routeConfig.TimeoutHandlerMethod())
+				if (reflect.Value{}) == controllerMethodValue {
+					panic(fmt.Sprintf("method %s not found in TimeoutHandler object %s", routeConfig.TimeoutHandlerMethod(), routeConfig.TimeoutHandlerAlias()))
+				}
+				routeTimeoutHandler = timeoutHandlerMethodValue.Interface().(func() (int, string))
+			}
+
+			// Registering route to Kernel
 			k.RegisterRoute(&Route{
-				Name:       routeName,
-				Url:        routeConfig.Url,
-				Methods:    routeConfig.Methods,
-				Controller: controller,
-				eventBus:   commonEventBus.NewEventBus(),
+				Name:           routeName,
+				Url:            routeConfig.Url,
+				Methods:        routeConfig.Methods,
+				Controller:     controller,
+				Timeout:        time.Millisecond * time.Duration(routeTimeoutValue),
+				TimeoutHandler: routeTimeoutHandler,
+				eventBus:       commonEventBus.NewEventBus(),
 			})
 
 			// Registering route's event listeners
@@ -261,10 +299,49 @@ func (k *Kernel) extractHandlerFromListenerConfig(listenerConfig commonConfig.Ev
 }
 
 func (k *Kernel) createRouteHandler(route *Route) http.HandlerFunc {
-	return func(responseWriter http.ResponseWriter, requestObj *http.Request) {
+	plainHandlerFunc := func(responseWriter http.ResponseWriter, requestObj *http.Request) {
 		RequestContextAppend(requestObj, requestCtxEventBusKey, route.eventBus)
 		responseObj := k.runRequestProcessingFlow(responseWriter, requestObj, route.Controller)
 		k.runSendResponse(responseWriter, requestObj, responseObj)
+	}
+
+	if 0 == route.Timeout {
+		return plainHandlerFunc
+	}
+
+	// TODO заменить на timeoutHandler
+	return http.TimeoutHandler(http.HandlerFunc(plainHandlerFunc), route.Timeout, "timeout").ServeHTTP
+}
+
+func timeoutHandler(plainHandler http.HandlerFunc, timeout time.Duration, timeoutHandler TimeoutHandler) http.HandlerFunc {
+	return func(responseWriter http.ResponseWriter, requestObj *http.Request) {
+		timeoutCtx, cancelTimeoutCtx := context.WithTimeout(requestObj.Context(), timeout)
+		defer cancelTimeoutCtx()
+
+		requestObj = requestObj.WithContext(timeoutCtx)
+		plainHandlerDone := make(chan struct{})
+		timeoutWriterObj := &timeoutWriter{
+			w:   responseWriter,
+			h:   make(http.Header),
+			req: requestObj,
+		}
+
+		// Spin processing of plain handler
+		go func() {
+			plainHandler(timeoutWriterObj, requestObj)
+			close(plainHandlerDone)
+		}()
+
+		// Waiting for completion of plain handler or timeout
+		select {
+		case <-plainHandlerDone:
+
+		case <-timeoutCtx.Done():
+			timeoutStatus, timeoutResponseBody := timeoutHandler()
+
+			responseWriter.WriteHeader(timeoutStatus)
+			_, _ = responseWriter.Write([]byte(timeoutResponseBody))
+		}
 	}
 }
 
@@ -331,24 +408,34 @@ func (k *Kernel) runRequestProcessingFlow(
 	if nil == responseObj {
 		responseObj = controller(requestObj)
 
-		switch typedResponse := responseObj.(type) {
-		// If response is websocket upgrade - perform it
-		case *response.WebsocketUpgradeResponse:
-			typedResponse.UpgradeToWebsocket(requestObj, responseWriterObj)
-		// If response is view - execute template and fill response body
-		case *response.ViewResponse:
-			if nil == typedResponse.Template {
-				typedResponse.SetTemplate(k.templates)
-			}
-		}
+		k.performRunRequestPostProcessing(responseWriterObj, requestObj, responseObj)
 
 		// Running RequestProcessed event processing
 		requestProcessedEvent := webEvent.NewRequestProcessed(responseWriterObj, requestObj, responseObj)
 		eventBus.Dispatch(requestProcessedEvent)
 		responseObj = requestProcessedEvent.GetResponse()
+	} else {
+		k.performRunRequestPostProcessing(responseWriterObj, requestObj, responseObj)
 	}
 
 	return
+}
+
+func (k *Kernel) performRunRequestPostProcessing(
+	responseWriterObj http.ResponseWriter,
+	requestObj *http.Request,
+	responseObj response.Response,
+) {
+	switch typedResponse := responseObj.(type) {
+	// If response is websocket upgrade - perform it
+	case *response.WebsocketUpgradeResponse:
+		typedResponse.UpgradeToWebsocket(requestObj, responseWriterObj)
+	// If response is view - execute template and fill response body
+	case *response.ViewResponse:
+		if nil == typedResponse.Template {
+			typedResponse.SetTemplate(k.templates)
+		}
+	}
 }
 
 func (k *Kernel) runSendResponse(responseWriter http.ResponseWriter, requestObj *http.Request, responseObj response.Response) {
@@ -415,11 +502,7 @@ func (k *Kernel) performResponseSend(responseWriterObj http.ResponseWriter, requ
 }
 
 func (k *Kernel) setupGraceShutdown(terminationErrors *[]error) chan bool {
-	shutdownTimeout := k.config.GetDuration("web.shutdown_timeout")
-	if 0 >= shutdownTimeout {
-		shutdownTimeout = configDefaultShutdownTimeoutMs
-	}
-	shutdownTimeout = shutdownTimeout * time.Millisecond
+	shutdownTimeout := k.getDurationFromConfig("web.shutdown_timeout", configDefaultShutdownTimeoutMs)
 
 	signalsChannel := make(chan os.Signal)
 	httpShutdownChannel := make(chan bool)
@@ -516,6 +599,15 @@ func (k *Kernel) performRecover(recoveredError interface{}, trace []byte, respon
 	return responseObj
 }
 
+func (k *Kernel) getDurationFromConfig(key string, defaultInMs int) time.Duration {
+	result := k.config.GetDuration(key)
+	if 0 >= result {
+		result = time.Duration(defaultInMs)
+	}
+
+	return time.Millisecond * result
+}
+
 //--------------------
 
 func NewKernel(configPath string) (*Kernel, error) {
@@ -562,6 +654,11 @@ func NewKernel(configPath string) (*Kernel, error) {
 		parametersStringMap := configObj.GetStringMapString("parameters")
 		kernel.container.SetParameters(parametersStringMap)
 	}
+
+	kernel.httpServer.ReadHeaderTimeout = kernel.getDurationFromConfig("web.server_read_header_timeout", defaultReadHeaderTimeoutMs)
+	kernel.httpServer.ReadTimeout = kernel.getDurationFromConfig("web.server_read_timeout", defaultReadTimeoutMs)
+	kernel.httpServer.WriteTimeout = kernel.getDurationFromConfig("web.server_write_timeout", defaultWriteTimeoutMs)
+	kernel.httpServer.IdleTimeout = kernel.getDurationFromConfig("web.server_idle_timeout", defaultIdleTimeoutMs)
 
 	return kernel, nil
 }
