@@ -10,8 +10,7 @@ type RouteConfig struct {
 	Methods        []string
 	Controller     string
 	EventListeners []commonConfig.EventListenerConfig `mapstructure:"event_listeners"`
-	Timeout        string
-	TimeoutHandler string `mapstructure:"timeout_handler"`
+	Timeout        TimeoutConfig
 }
 
 func (c *RouteConfig) ControllerAlias() string {
@@ -20,12 +19,4 @@ func (c *RouteConfig) ControllerAlias() string {
 
 func (c *RouteConfig) ControllerMethod() string {
 	return helper.GetStringPart(c.Controller, ":", 1)
-}
-
-func (c *RouteConfig) TimeoutHandlerAlias() string {
-	return helper.GetStringPart(c.TimeoutHandler, ":", 0)
-}
-
-func (c *RouteConfig) TimeoutHandlerMethod() string {
-	return helper.GetStringPart(c.TimeoutHandler, ":", 1)
 }

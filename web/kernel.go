@@ -173,6 +173,25 @@ func (k *Kernel) readConfig() {
 			}
 		}
 
+		// Create common timeout handler
+		commonTimeoutConfig := webConfig.TimeoutConfig{}
+		commonTimeoutConfigErr := k.config.UnmarshalKey("web.routing.timeout", &commonTimeoutConfig)
+		if nil != commonTimeoutConfigErr {
+			panic("failed to read routing common listeners config: " + commonListenersConfigErr.Error())
+		}
+		commonTimeout, commonTimeoutHandler := k.extractTimeoutHandlerFromConfig(
+			commonTimeoutConfig,
+			"common timeout config",
+			defaultRouteTimeoutMs,
+			func() response.Response {
+				tr := response.NewBytesResponse()
+				tr.SetHttpStatus(http.StatusServiceUnavailable)
+				tr.Body.WriteString("timeout")
+
+				return tr
+			},
+		)
+
 		for routeName := range k.config.GetStringMap("web.routing.routes") {
 			routeConfig := &webConfig.RouteConfig{}
 			routeConfigErr := k.config.UnmarshalKey("web.routing.routes."+routeName, routeConfig)
@@ -189,33 +208,16 @@ func (k *Kernel) readConfig() {
 			controller := controllerMethodValue.Interface().(func(*http.Request) response.Response)
 
 			// Determining route timeout and timeout handler
-			var routeTimeoutValue int
-			if "" == routeConfig.Timeout {
-				routeTimeoutValue = defaultRouteTimeoutMs
-			} else {
-				var routeTimeoutValueError error
-				routeTimeoutValue, routeTimeoutValueError = strconv.Atoi(routeConfig.Timeout)
-				if nil != routeTimeoutValueError {
-					panic(fmt.Sprintf(
-						"route '%s %s' has non-integer value of timeout (%s)",
-						strings.Join(routeConfig.Methods, " "),
-						routeConfig.Url,
-						routeConfig.Timeout,
-					))
-				}
-			}
-
-			var routeTimeoutHandler TimeoutHandler
-			if "" == routeConfig.TimeoutHandler {
-				routeTimeoutHandler = func() (int, string) { return http.StatusServiceUnavailable, "timeout" }
-			} else {
-				timeoutHandlerObj := k.GetContainer().GetByAlias(routeConfig.TimeoutHandlerAlias())
-				timeoutHandlerMethodValue := reflect.ValueOf(timeoutHandlerObj).MethodByName(routeConfig.TimeoutHandlerMethod())
-				if (reflect.Value{}) == controllerMethodValue {
-					panic(fmt.Sprintf("method %s not found in TimeoutHandler object %s", routeConfig.TimeoutHandlerMethod(), routeConfig.TimeoutHandlerAlias()))
-				}
-				routeTimeoutHandler = timeoutHandlerMethodValue.Interface().(func() (int, string))
-			}
+			routeTimeout, routeTimeoutHandler := k.extractTimeoutHandlerFromConfig(
+				routeConfig.Timeout,
+				fmt.Sprintf(
+					"route '%s %s' has non-integer value of timeout (%s)", strings.Join(routeConfig.Methods, " "),
+					routeConfig.Url,
+					routeConfig.Timeout,
+				),
+				commonTimeout,
+				commonTimeoutHandler,
+			)
 
 			// Registering route to Kernel
 			k.RegisterRoute(&Route{
@@ -223,7 +225,7 @@ func (k *Kernel) readConfig() {
 				Url:            routeConfig.Url,
 				Methods:        routeConfig.Methods,
 				Controller:     controller,
-				Timeout:        time.Millisecond * time.Duration(routeTimeoutValue),
+				Timeout:        time.Millisecond * time.Duration(routeTimeout),
 				TimeoutHandler: routeTimeoutHandler,
 				eventBus:       commonEventBus.NewEventBus(),
 			})
@@ -298,6 +300,39 @@ func (k *Kernel) extractHandlerFromListenerConfig(listenerConfig commonConfig.Ev
 	return
 }
 
+func (k *Kernel) extractTimeoutHandlerFromConfig(
+	timeoutConfig webConfig.TimeoutConfig,
+	description string,
+	defaultTimeout int,
+	defaultHandler TimeoutHandler,
+) (int, TimeoutHandler) {
+	var timeout int
+	var handler TimeoutHandler
+
+	if "" == timeoutConfig.Duration {
+		timeout = defaultTimeout
+	} else {
+		var timeoutError error
+		timeout, timeoutError = strconv.Atoi(timeoutConfig.Duration)
+		if nil != timeoutError {
+			panic(fmt.Sprintf("%s has non-integer value of timeout (%s)", description, timeoutConfig.Duration))
+		}
+	}
+
+	if "" == timeoutConfig.Handler {
+		handler = defaultHandler
+	} else {
+		timeoutHandlerObj := k.GetContainer().GetByAlias(timeoutConfig.HandlerAlias())
+		timeoutHandlerMethodValue := reflect.ValueOf(timeoutHandlerObj).MethodByName(timeoutConfig.HandlerMethod())
+		if (reflect.Value{}) == timeoutHandlerMethodValue {
+			panic(fmt.Sprintf("method %s not found in TimeoutHandler object %s", timeoutConfig.HandlerMethod(), timeoutConfig.HandlerAlias()))
+		}
+		handler = timeoutHandlerMethodValue.Interface().(func() response.Response)
+	}
+
+	return timeout, handler
+}
+
 func (k *Kernel) createRouteHandler(route *Route) http.HandlerFunc {
 	plainHandlerFunc := func(responseWriter http.ResponseWriter, requestObj *http.Request) {
 		RequestContextAppend(requestObj, requestCtxEventBusKey, route.eventBus)
@@ -309,22 +344,17 @@ func (k *Kernel) createRouteHandler(route *Route) http.HandlerFunc {
 		return plainHandlerFunc
 	}
 
-	// TODO заменить на timeoutHandler
-	return http.TimeoutHandler(http.HandlerFunc(plainHandlerFunc), route.Timeout, "timeout").ServeHTTP
+	return k.timeoutHandler(plainHandlerFunc, route.Timeout, route.TimeoutHandler)
 }
 
-func timeoutHandler(plainHandler http.HandlerFunc, timeout time.Duration, timeoutHandler TimeoutHandler) http.HandlerFunc {
+func (k *Kernel) timeoutHandler(plainHandler http.HandlerFunc, timeout time.Duration, timeoutHandler TimeoutHandler) http.HandlerFunc {
 	return func(responseWriter http.ResponseWriter, requestObj *http.Request) {
 		timeoutCtx, cancelTimeoutCtx := context.WithTimeout(requestObj.Context(), timeout)
 		defer cancelTimeoutCtx()
 
 		requestObj = requestObj.WithContext(timeoutCtx)
 		plainHandlerDone := make(chan struct{})
-		timeoutWriterObj := &timeoutWriter{
-			w:   responseWriter,
-			h:   make(http.Header),
-			req: requestObj,
-		}
+		timeoutWriterObj := newTimeoutWriter(responseWriter, requestObj)
 
 		// Spin processing of plain handler
 		go func() {
@@ -335,12 +365,23 @@ func timeoutHandler(plainHandler http.HandlerFunc, timeout time.Duration, timeou
 		// Waiting for completion of plain handler or timeout
 		select {
 		case <-plainHandlerDone:
-
+			timeoutWriterObj.writeMutex.Lock()
+			defer timeoutWriterObj.writeMutex.Unlock()
+			for headerName, headerVal := range timeoutWriterObj.Header() {
+				responseWriter.Header()[headerName] = headerVal
+			}
+			responseWriter.WriteHeader(timeoutWriterObj.httpStatus)
+			_, _ = responseWriter.Write(timeoutWriterObj.bodyBytes.Bytes())
 		case <-timeoutCtx.Done():
-			timeoutStatus, timeoutResponseBody := timeoutHandler()
-
-			responseWriter.WriteHeader(timeoutStatus)
-			_, _ = responseWriter.Write([]byte(timeoutResponseBody))
+			timeoutWriterObj.writeMutex.Lock()
+			defer timeoutWriterObj.writeMutex.Unlock()
+			timeoutResponse := timeoutHandler()
+			k.performRunRequestPostProcessing(responseWriter, requestObj, timeoutResponse)
+			for headerName, headerVal := range timeoutResponse.GetHeaders() {
+				responseWriter.Header()[headerName] = headerVal
+			}
+			responseWriter.WriteHeader(timeoutResponse.GetHttpStatus())
+			_, _ = responseWriter.Write(timeoutResponse.GetBodyBytes().Bytes())
 		}
 	}
 }
@@ -463,16 +504,16 @@ func (k *Kernel) performResponseSend(responseWriterObj http.ResponseWriter, requ
 					}
 				}()
 
-				responseObj = k.performRecover(recoveredError, debug.Stack(), responseWriterObj, requestObj)
+				recoverResponseObj := k.performRecover(recoveredError, debug.Stack(), responseWriterObj, requestObj)
 
-				responseBody = responseObj.GetBodyBytes().Bytes()
-				responseStatus = responseObj.GetHttpStatus()
-				responseHeader = responseObj.GetHeaders()
+				responseBody = recoverResponseObj.GetBodyBytes().Bytes()
+				responseStatus = recoverResponseObj.GetHttpStatus()
+				responseHeader = recoverResponseObj.GetHeaders()
 			}()
 		}
 
 		// Sending headers
-		for headerName, headerValues := range responseObj.GetHeaders() {
+		for headerName, headerValues := range responseHeader {
 			for _, value := range headerValues {
 				responseWriterObj.Header().Add(headerName, value)
 			}

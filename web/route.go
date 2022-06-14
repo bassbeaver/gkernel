@@ -8,7 +8,7 @@ import (
 )
 
 type Controller func(*http.Request) response.Response
-type TimeoutHandler func() (int, string)
+type TimeoutHandler func() response.Response
 
 //--------------------
 
